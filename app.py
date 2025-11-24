@@ -78,7 +78,7 @@ def make_dummies(df_in, var, levels):
     dmy.index = df_in.index
     return dmy
 
-# ================== 2. Table 1 로직 (에러 핸들링 강화) ==================
+# ================== 2. Table 1 로직 (에러 핸들링) ==================
 
 def analyze_table1_robust(df, group_col, value_map, threshold=20):
     result_rows = []
@@ -96,7 +96,7 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
         is_numeric_type = pd.api.types.is_numeric_dtype(valid[var])
         many_unique = valid[var].nunique() > threshold
 
-        # 연속형 변수 처리
+        # 연속형 변수
         if is_numeric_type and many_unique:
             groups_data = [valid[valid[group_col] == g][var] for g in group_values]
             
@@ -146,10 +146,10 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
             row['Test Method'] = method
             result_rows.append(row)
 
-        # --- 범주형 변수 처리 ---
+        # --- 범주형 변수 ---
         else:
             try:
-                # Crosstab 시도 (여기서 타입 혼합 에러 발생 가능)
+                # Crosstab (여기서 타입 혼합 에러 발생 가능)
                 ct = pd.crosstab(valid[group_col], valid[var])
                 
                 method = "Chi-square"
@@ -169,7 +169,6 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
                     row_head[f"{g_name} (n={group_n[g]})"] = ""
                 result_rows.append(row_head)
 
-                # 하위 레벨 정렬 (여기서도 에러 발생 가능)
                 unique_levels = sorted(valid[var].unique()) 
                 
                 for val in unique_levels:
@@ -184,9 +183,8 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
                     result_rows.append(row_sub)
 
             except TypeError as e:
-                # Mixed Type 오류 발생 시, 분석을 중단하고 오류 정보를 리턴
+                # Mixed Type 오류 발생 시 정보 리턴
                 error_msg = str(e)
-                # Pandas/Numpy 정렬 에러 메시지 패턴 확인
                 if "not supported between instances" in error_msg or "orderable" in error_msg or "mixed types" in error_msg.lower():
                     types_found = valid[var].apply(type).unique()
                     types_str = [t.__name__ for t in types_found]
@@ -275,12 +273,11 @@ def run_psm(df, treatment_col, covariates, caliper=0.2):
 # ================== 메인 앱 UI ==================
 
 st.title("Dr.Stats Pro: Medical Statistics & PSM")
-st.markdown("---")
 
 uploaded_file = st.file_uploader("📂 데이터 파일 업로드 (Excel/CSV)", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
-    # 1. 초기 데이터 로드 (세션 상태가 없으면 로드)
+    # 1. 데이터 로드 (최초 1회)
     if 'df' not in st.session_state:
         if uploaded_file.name.endswith('.csv'):
             df_load = pd.read_csv(uploaded_file)
@@ -289,11 +286,24 @@ if uploaded_file:
         df_load.columns = df_load.columns.astype(str).str.strip()
         st.session_state['df'] = df_load
     
-    # 2. 항상 세션 상태의 df를 사용 (수정 사항 반영을 위해)
+    # 2. 데이터 에디터 (항상 상단에 노출)
+    st.markdown("### ✏️ 데이터 미리보기 및 수정 (Data Editor)")
+    st.info("데이터에 오류(숫자/문자 섞임 등)가 있다면 여기서 직접 수정한 뒤, 아래 탭에서 분석을 진행하세요. (수정 시 자동 저장됨)")
+    
+    # 상시 수정 가능한 에디터 (수정하면 st.session_state['df']가 즉시 업데이트됨)
+    edited_df = st.data_editor(st.session_state['df'], num_rows="dynamic", use_container_width=True, key='main_editor')
+    
+    # 수정된 내용을 세션에 반영
+    if not edited_df.equals(st.session_state['df']):
+        st.session_state['df'] = edited_df
+        st.rerun() # 수정 즉시 앱 새로고침하여 반영
+
+    # 분석에는 항상 최신 수정본(edited_df) 사용
     df = st.session_state['df']
     
-    st.success(f"데이터 로드 완료: 총 {df.shape[0]} 행, {df.shape[1]} 열")
-    
+    st.divider() # 구분선
+
+    # 3. 분석 탭
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Table 1 (기초통계)", 
         "⏱️ Cox Regression (생존분석)", 
@@ -319,36 +329,19 @@ if uploaded_file:
                         t1_res, error_info = analyze_table1_robust(df, group_col, value_map)
                         
                         if error_info:
-                            # 🚨 에러 발생 시 수정 UI 표시
-                            st.error(f"🚨 **데이터 오류: '{error_info['var']}' 컬럼**")
-                            
+                            # 에러 발생 시 안내 메시지
                             if error_info['type'] == 'mixed_type':
+                                st.error(f"🚨 **데이터 오류 발생: '{error_info['var']}' 컬럼**")
                                 st.warning(
-                                    f"숫자와 문자가 섞여 있어 분석이 중단되었습니다.\n"
-                                    f"아래 표에서 직접 데이터를 수정하고 **[수정 완료 및 재실행]** 버튼을 누르세요."
+                                    f"해당 변수에 숫자와 문자가 섞여 있어 분석할 수 없습니다.\n"
+                                    f"👉 **맨 위 '데이터 미리보기 및 수정' 표에서 '{error_info['var']}' 컬럼을 찾아 값을 통일해주세요.**\n"
+                                    f"(예: 'Unknown'을 지우거나 숫자로 변경)"
                                 )
-                                
-                                # 수정할 데이터 준비 (그룹 변수와 문제 변수만 표시)
-                                st.markdown(f"### ✏️ 데이터 직접 수정하기 ({error_info['var']})")
-                                cols_to_edit = [group_col, error_info['var']]
-                                
-                                # data_editor 출력
-                                edited_subset = st.data_editor(
-                                    df[cols_to_edit], 
-                                    key=f"editor_{error_info['var']}",
-                                    num_rows="dynamic",
-                                    use_container_width=True
-                                )
-                                
-                                if st.button("✅ 수정 완료 및 재실행", type="primary"):
-                                    # 세션 상태 업데이트
-                                    st.session_state['df'][error_info['var']] = edited_subset[error_info['var']]
-                                    st.success("수정 사항이 반영되었습니다. 페이지가 새로고침됩니다.")
-                                    st.rerun()
+                                st.write(f"**감지된 데이터 타입:** {error_info['types']}")
+                                st.write(f"**값 예시:** {list(error_info['examples'])}")
                             else:
                                 st.error(f"알 수 없는 오류: {error_info['msg']}")
                         else:
-                            # ✅ 성공 시 결과 표시
                             st.dataframe(t1_res, use_container_width=True)
                             output = io.BytesIO()
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
