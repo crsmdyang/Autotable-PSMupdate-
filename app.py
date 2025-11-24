@@ -104,7 +104,7 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# ================== 2. Table 1 로직 (사용자 지정 타입 반영) ==================
+# ================== 2. Table 1 로직 ==================
 
 def suggest_variable_types(df, target_cols, threshold=20):
     """초기 변수 타입 제안 (연속형 vs 범주형)"""
@@ -134,6 +134,7 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         final_col_order.append(f"{g_name} (n={group_n[g]})")
     final_col_order.extend(['p-value', 'Test Method'])
 
+    # 분석
     for var in target_cols:
         if var == group_col: continue
         
@@ -146,14 +147,13 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         elif var in user_cat_vars:
             is_continuous = False
         else:
-            # Fallback: 어느 리스트에도 없으면 기본 로직
+            # Fallback
             is_continuous = pd.api.types.is_numeric_dtype(valid[var]) and (valid[var].nunique() > 20)
 
-        # ------------------ 1. 연속형 분석 (Continuous) ------------------
+        # 1. 연속형 분석
         if is_continuous:
             groups_data = [valid[valid[group_col] == g][var] for g in group_values]
             
-            # 정규성 검정 (N < 5000 일 때만 수행, 너무 크면 비효율적)
             is_normal = True
             for g_dat in groups_data:
                 if len(g_dat) < 3: 
@@ -165,7 +165,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
                         if p_norm < 0.05: is_normal = False
                     except:
                         is_normal = False
-            # *사용자가 강제로 연속형으로 지정했어도, 정규성 만족 여부에 따라 T-test/Mann-Whitney 나뉨
 
             row = {'Characteristic': var}
             for g, g_name in zip(group_values, group_names):
@@ -201,12 +200,10 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
             row['Test Method'] = method
             result_rows.append(row)
 
-        # ------------------ 2. 범주형 분석 (Categorical) ------------------
+        # 2. 범주형 분석
         else:
             try:
-                # 안전한 Crosstab (Mixed Type 에러 방지를 위해 str 변환)
                 ct = pd.crosstab(valid[group_col], valid[var].astype(str))
-                
                 method = "Chi-square"
                 p = np.nan
                 
@@ -240,10 +237,9 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
                     result_rows.append(row_sub)
 
             except Exception as e:
-                # 에러 발생 시 로그만 남기고 스킵 (사용자 에디터 유도)
                 return None, {"type": "unknown", "var": var, "msg": str(e)}
 
-    # 최종 결과 DataFrame
+    # 최종 결과
     df_res = pd.DataFrame(result_rows)
     if not df_res.empty:
         cols_to_use = [c for c in final_col_order if c in df_res.columns]
@@ -326,7 +322,6 @@ st.title("Dr.Stats Ultimate: Medical Statistics Tool")
 uploaded_file = st.file_uploader("📂 데이터 파일 업로드 (Excel/CSV)", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
-    # 1. 데이터 로드
     if 'df' not in st.session_state:
         if uploaded_file.name.endswith('.csv'):
             df_load = pd.read_csv(uploaded_file)
@@ -335,20 +330,18 @@ if uploaded_file:
         df_load.columns = df_load.columns.astype(str).str.strip()
         st.session_state['df'] = df_load
     
-    # 2. 데이터 에디터 (항상 노출)
-    st.markdown("### ✏️ 데이터 미리보기 및 수정")
-    st.info("데이터 오류(문자/숫자 혼합)가 있으면 여기서 직접 수정하세요. 수정 시 즉시 반영됩니다.")
-    
-    edited_df = st.data_editor(st.session_state['df'], num_rows="dynamic", use_container_width=True, key='main_editor')
-    
-    if not edited_df.equals(st.session_state['df']):
-        st.session_state['df'] = edited_df
-        st.rerun()
+    # 데이터 에디터 (수정 기능)
+    with st.expander("✏️ 원본 데이터 미리보기 및 수정", expanded=False):
+        st.info("데이터 오류(문자/숫자 혼합)가 있으면 여기서 직접 수정하세요. 수정 시 즉시 반영됩니다.")
+        edited_df = st.data_editor(st.session_state['df'], num_rows="dynamic", use_container_width=True, key='main_editor')
+        if not edited_df.equals(st.session_state['df']):
+            st.session_state['df'] = edited_df
+            st.rerun()
 
     df = st.session_state['df']
     st.divider()
 
-    # 3. 탭 구성
+    # 탭 구성
     tab1, tab_km, tab2, tab3, tab4, tab_methods = st.tabs([
         "📊 Table 1 (기초통계)", 
         "📈 KM Curve (생존분석)",
@@ -369,40 +362,87 @@ if uploaded_file:
             with col1:
                 selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
             
-            # 분석할 변수 선택
             all_cols = [c for c in df.columns if c != group_col]
             with col2:
-                target_vars = st.multiselect("분석에 포함할 변수 선택 (기본: 전체)", all_cols, default=all_cols)
+                target_vars = st.multiselect("분석에 포함할 변수 선택", all_cols, default=all_cols)
 
-            # [NEW] 변수 타입 설정 (자동 제안 + 사용자 수정)
             if target_vars:
-                with st.expander("⚙️ 변수 타입 상세 설정 (연속형 vs 범주형)", expanded=False):
-                    # 초기값 제안
+                # ----------------------------------------------------
+                # [핵심] 변수 타입 관리 (상호 배타적 선택 기능)
+                # ----------------------------------------------------
+                
+                # 1. 초기화 (Target Vars가 변경될 때마다 자동 재분류)
+                state_key = f"type_init_{hash(tuple(target_vars))}"
+                if 'current_target_hash' not in st.session_state or st.session_state.current_target_hash != state_key:
                     auto_cont, auto_cat = suggest_variable_types(df, target_vars)
-                    
-                    st.caption("자동으로 분류된 타입을 확인하고, 필요하면 위치를 옮기세요.")
-                    c_type1, c_type2 = st.columns(2)
-                    
-                    user_cont_vars = c_type1.multiselect("📏 연속형 변수 (Mean/Median)", options=target_vars, default=auto_cont)
-                    user_cat_vars = c_type2.multiselect("📦 범주형 변수 (n(%))", options=target_vars, default=auto_cat)
-                    
-                    # 중복 경고
-                    overlap = set(user_cont_vars) & set(user_cat_vars)
-                    if overlap:
-                        st.warning(f"⚠️ 다음 변수가 두 목록에 모두 포함되어 있습니다 (연속형으로 처리됨): {overlap}")
+                    st.session_state['user_cont'] = auto_cont
+                    st.session_state['user_cat'] = auto_cat
+                    st.session_state['current_target_hash'] = state_key
+
+                # 2. 콜백 함수 (한쪽에서 선택하면 다른쪽에서 제거)
+                def on_cont_change():
+                    # Continuous에서 선택된 것들을 Categorical에서 제거
+                    new_cont = st.session_state.widget_cont
+                    st.session_state['user_cont'] = new_cont
+                    st.session_state['user_cat'] = [x for x in target_vars if x not in new_cont]
+
+                def on_cat_change():
+                    # Categorical에서 선택된 것들을 Continuous에서 제거
+                    new_cat = st.session_state.widget_cat
+                    st.session_state['user_cat'] = new_cat
+                    st.session_state['user_cont'] = [x for x in target_vars if x not in new_cat]
+
+                st.write("---")
+                st.markdown("#### ⚙️ 변수 타입 설정 (자동 연동)")
+                st.caption("✨ **꿀팁:** 아래 표에서 `Type`을 변경하면 즉시 반영됩니다! (드래그 앤 드롭 대체 기능)")
+
+                # [UI 옵션 1] 데이터 에디터 방식 (가장 추천 - 드래그 대체)
+                # 변수와 현재 타입을 DataFrame으로 변환
+                type_df = pd.DataFrame({
+                    'Variable': target_vars,
+                    'Type': ['Continuous' if v in st.session_state['user_cont'] else 'Categorical' for v in target_vars]
+                })
+                
+                edited_types = st.data_editor(
+                    type_df,
+                    column_config={
+                        "Type": st.column_config.SelectboxColumn(
+                            "Variable Type",
+                            help="연속형/범주형을 변경하세요",
+                            width="medium",
+                            options=["Continuous", "Categorical"],
+                            required=True,
+                        )
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    key='type_editor'
+                )
+                
+                # 에디터 변경 사항 반영
+                new_cont_list = edited_types[edited_types['Type'] == 'Continuous']['Variable'].tolist()
+                new_cat_list = edited_types[edited_types['Type'] == 'Categorical']['Variable'].tolist()
+                
+                # 세션 업데이트
+                st.session_state['user_cont'] = new_cont_list
+                st.session_state['user_cat'] = new_cat_list
+                
+                # ----------------------------------------------------
 
             value_map = {v: str(v) for v in selected_vals}
             
             if len(selected_vals) >= 2 and target_vars:
                 if st.button("Table 1 생성", key='btn_t1'):
                     with st.spinner("분석 중... (정규성 검정 포함)"):
-                        # 사용자 설정 변수 리스트 전달
-                        t1_res, error_info = analyze_table1_robust(df, group_col, value_map, target_vars, user_cont_vars, user_cat_vars)
+                        t1_res, error_info = analyze_table1_robust(
+                            df, group_col, value_map, target_vars, 
+                            st.session_state['user_cont'], 
+                            st.session_state['user_cat']
+                        )
                         
                         if error_info:
-                            st.error(f"🚨 **데이터 오류 발생: '{error_info['var']}' 컬럼**")
-                            st.warning(f"맨 위 에디터에서 '{error_info['var']}' 값을 통일해주세요. (숫자/문자 혼합됨)")
-                            st.write(f"오류 내용: {error_info['msg']}")
+                            st.error(f"🚨 **데이터 오류: '{error_info['var']}'**")
+                            st.warning(f"맨 위 '데이터 수정' 탭에서 값을 통일해주세요. 오류: {error_info['msg']}")
                         else:
                             st.dataframe(t1_res, use_container_width=True)
                             output = io.BytesIO()
@@ -410,11 +450,9 @@ if uploaded_file:
                                 t1_res.to_excel(writer, index=False)
                             st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
 
-    # ------------------ TAB KM: Kaplan-Meier Curve ------------------
+    # ------------------ TAB KM ------------------
     with tab_km:
         st.subheader("📈 Kaplan-Meier Survival Analysis")
-        st.info("두 그룹 간의 생존 곡선을 비교하고 Log-rank test를 수행합니다.")
-        
         km_c1, km_c2 = st.columns(2)
         km_time = km_c1.selectbox("Time (생존기간)", df.columns, key='km_t')
         km_event = km_c2.selectbox("Event (사건발생)", df.columns, key='km_e')
@@ -450,7 +488,6 @@ if uploaded_file:
                     st.success(f"Log-rank Test p-value: {format_p(res.p_value)}")
                 else:
                     st.warning("Log-rank test는 현재 2개 그룹 비교만 지원합니다.")
-                    
             except Exception as e:
                 st.error(f"분석 오류: {e}")
 
@@ -479,7 +516,6 @@ if uploaded_file:
                 
                 if st.button("Cox 분석 실행", key='btn_cox'):
                     st.info(f"N={len(df_cox)}, Event={int(df_cox['E'].sum())}")
-                    
                     uni_res = {}
                     significant_vars = []
                     
@@ -495,7 +531,6 @@ if uploaded_file:
                                 data = df_cox[['T', 'E', var]].copy()
                                 data[var] = pd.to_numeric(data[var], errors='coerce')
                                 data = data.dropna()
-                            
                             cph = CoxPHFitter()
                             cph.fit(data, duration_col='T', event_col='E')
                             if min(cph.summary['p'].values) < p_threshold:
@@ -612,11 +647,9 @@ if uploaded_file:
                             res_df = conf[['OR', 'Lower', 'Upper', 'p']]
                             res_df = res_df.drop('const', errors='ignore')
                             st.dataframe(res_df.style.format("{:.3f}"))
-                            
                             st.subheader("🌲 Forest Plot (Odds Ratio)")
                             fig_forest = plot_forest(res_df, title="Forest Plot - Logistic Regression", effect_col="OR")
                             st.pyplot(fig_forest)
-                            
                         except Exception as e:
                             st.error(f"Error: {e}")
 
@@ -675,7 +708,6 @@ if uploaded_file:
     with tab_methods:
         st.header("📝 Methods Section Generator")
         st.info("논문의 'Statistical Analysis' 섹션에 사용할 수 있는 초안입니다.")
-        
         methods_text = """
 **Statistical Analysis**
 
