@@ -80,23 +80,19 @@ def make_dummies(df_in, var, levels):
 
 def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     """Forest Plot 그리기 (HR/OR 시각화)"""
-    # 데이터 준비 (역순으로 그려야 위에서부터 나옴)
     df_plot = df_res.iloc[::-1].copy()
     
     fig, ax = plt.subplots(figsize=(6, len(df_plot) * 0.5 + 2))
     
-    # 에러바 (CI)
     y_pos = np.arange(len(df_plot))
-    mid = df_plot[effect_col] if effect_col in df_plot.columns else df_plot.iloc[:, 0] # 첫번째 컬럼(HR or OR)
+    mid = df_plot[effect_col] if effect_col in df_plot.columns else df_plot.iloc[:, 0]
     
-    # 컬럼명 유연하게 찾기
     lo_col = [c for c in df_plot.columns if "lower" in c.lower() or "0" in str(c) or "Lower" in c][0]
     hi_col = [c for c in df_plot.columns if "upper" in c.lower() or "1" in str(c) or "Upper" in c][0]
     
     lo = df_plot[lo_col]
     hi = df_plot[hi_col]
     
-    # 에러바 길이 계산
     xerr = [mid - lo, hi - mid]
     
     ax.errorbar(mid, y_pos, xerr=xerr, fmt='o', color='black', ecolor='gray', capsize=5)
@@ -108,7 +104,7 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# ================== 2. Table 1 로직 (변수 선택 기능 추가) ==================
+# ================== 2. Table 1 로직 (컬럼 순서 고정) ==================
 
 def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
     result_rows = []
@@ -116,14 +112,18 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
     group_names = list(value_map.values())
     group_n = {g: (df[group_col] == g).sum() for g in group_values}
     
-    # [수정] 사용자가 선택한 변수(target_cols)만 반복
+    # [중요] 최종 출력할 컬럼 순서 미리 정의 (변수명 -> 그룹들 -> p-value -> method)
+    final_col_order = ['Characteristic']
+    for g, g_name in zip(group_values, group_names):
+        final_col_order.append(f"{g_name} (n={group_n[g]})")
+    final_col_order.extend(['p-value', 'Test Method'])
+
     for var in target_cols:
         if var == group_col: continue
         
         valid = df[df[group_col].isin(group_values)].dropna(subset=[var])
         if valid.empty: continue
 
-        # --- 연속형/범주형 판단 ---
         is_numeric_type = pd.api.types.is_numeric_dtype(valid[var])
         many_unique = valid[var].nunique() > threshold
 
@@ -177,7 +177,7 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
             row['Test Method'] = method
             result_rows.append(row)
 
-        # --- 범주형 변수 ---
+        # 범주형 변수
         else:
             try:
                 ct = pd.crosstab(valid[group_col], valid[var])
@@ -193,9 +193,13 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
                 else:
                     _, p, _, _ = stats.chi2_contingency(ct)
 
-                row_head = {'Characteristic': var, 'p-value': format_p(p), 'Test Method': method}
+                # [수정] 헤더 행 생성 시 그룹 컬럼을 중간에 배치
+                row_head = {'Characteristic': var}
                 for g, g_name in zip(group_values, group_names):
                     row_head[f"{g_name} (n={group_n[g]})"] = ""
+                row_head['p-value'] = format_p(p)
+                row_head['Test Method'] = method
+                
                 result_rows.append(row_head)
 
                 unique_levels = sorted(valid[var].unique()) 
@@ -226,7 +230,14 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
             except Exception as e:
                 return None, {"type": "unknown", "var": var, "msg": str(e)}
 
-    return pd.DataFrame(result_rows), None
+    # [중요] 최종 DataFrame 생성 후 컬럼 순서 강제 재배열
+    df_res = pd.DataFrame(result_rows)
+    if not df_res.empty:
+        # 존재하는 컬럼만 선택하여 순서 적용
+        cols_to_use = [c for c in final_col_order if c in df_res.columns]
+        df_res = df_res[cols_to_use]
+
+    return df_res, None
 
 # ================== 3. PSM 관련 함수 ==================
 
@@ -325,7 +336,7 @@ if uploaded_file:
     df = st.session_state['df']
     st.divider()
 
-    # 3. 탭 구성 (New Features 포함)
+    # 3. 탭 구성
     tab1, tab_km, tab2, tab3, tab4, tab_methods = st.tabs([
         "📊 Table 1 (기초통계)", 
         "📈 KM Curve (생존분석)",
@@ -335,7 +346,7 @@ if uploaded_file:
         "📝 Methods 작문"
     ])
 
-    # ------------------ TAB 1: Baseline Characteristics (변수 선택 추가) ------------------
+    # ------------------ TAB 1: Baseline Characteristics ------------------
     with tab1:
         st.subheader("Table 1: 인구통계학적 특성 비교")
         group_col = st.selectbox("그룹 변수 선택", df.columns, key='t1_group')
@@ -369,7 +380,7 @@ if uploaded_file:
                                 t1_res.to_excel(writer, index=False)
                             st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
 
-    # ------------------ TAB KM: Kaplan-Meier Curve (New!) ------------------
+    # ------------------ TAB KM: Kaplan-Meier Curve ------------------
     with tab_km:
         st.subheader("📈 Kaplan-Meier Survival Analysis")
         st.info("두 그룹 간의 생존 곡선을 비교하고 Log-rank test를 수행합니다.")
@@ -381,18 +392,13 @@ if uploaded_file:
         
         if st.button("KM Curve 그리기"):
             try:
-                # 데이터 준비
                 df_km = df[[km_time, km_event, km_group]].dropna()
                 df_km[km_time] = pd.to_numeric(df_km[km_time], errors='coerce')
-                # Event 처리 (간단하게 1이 사건, 0이 검열이라 가정 혹은 변환)
                 
-                # 시각화
                 kmf = KaplanMeierFitter()
                 fig, ax = plt.subplots(figsize=(10, 6))
                 
                 groups = df_km[km_group].unique()
-                results_logrank = {}
-                
                 for g in groups:
                     mask = df_km[km_group] == g
                     kmf.fit(df_km.loc[mask, km_time], df_km.loc[mask, km_event], label=str(g))
@@ -402,7 +408,6 @@ if uploaded_file:
                 plt.ylabel("Survival Probability")
                 st.pyplot(fig)
                 
-                # Log-rank Test
                 if len(groups) == 2:
                     g1 = groups[0]
                     g2 = groups[1]
@@ -419,7 +424,7 @@ if uploaded_file:
             except Exception as e:
                 st.error(f"분석 오류: {e}")
 
-    # ------------------ TAB 2: Cox Regression (Forest Plot 추가) ------------------
+    # ------------------ TAB 2: Cox Regression ------------------
     with tab2:
         st.subheader("Cox Proportional Hazards Model")
         c1, c2 = st.columns(2)
@@ -496,7 +501,6 @@ if uploaded_file:
                             st.subheader("2. Multivariate Result")
                             st.dataframe(res_summary)
                             
-                            # [NEW] Forest Plot
                             st.subheader("🌲 Forest Plot (Hazard Ratio)")
                             fig_forest = plot_forest(res_summary, title="Forest Plot - Cox Regression", effect_col="exp(coef)")
                             st.pyplot(fig_forest)
@@ -507,7 +511,7 @@ if uploaded_file:
                         except Exception as e:
                             st.error(f"Error: {e}")
 
-    # ------------------ TAB 3: Logistic Regression (Forest Plot 추가) ------------------
+    # ------------------ TAB 3: Logistic Regression ------------------
     with tab3:
         st.subheader("Binary Logistic Regression")
         dep_var = st.selectbox("Y (종속변수)", df.columns, key='log_y')
@@ -579,7 +583,6 @@ if uploaded_file:
                             res_df = res_df.drop('const', errors='ignore')
                             st.dataframe(res_df.style.format("{:.3f}"))
                             
-                            # [NEW] Forest Plot
                             st.subheader("🌲 Forest Plot (Odds Ratio)")
                             fig_forest = plot_forest(res_df, title="Forest Plot - Logistic Regression", effect_col="OR")
                             st.pyplot(fig_forest)
@@ -638,7 +641,7 @@ if uploaded_file:
                                 matched_df.drop(columns=['__T', 'logit_ps']).to_excel(writer, index=False, sheet_name='Matched_Data')
                             st.download_button("📥 매칭 데이터 다운로드", out_psm.getvalue(), "PSM_Matched_Data.xlsx")
 
-    # ------------------ TAB Methods: 자동 작문 (New!) ------------------
+    # ------------------ TAB Methods ------------------
     with tab_methods:
         st.header("📝 Methods Section Generator")
         st.info("논문의 'Statistical Analysis' 섹션에 사용할 수 있는 초안입니다.")
