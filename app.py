@@ -147,13 +147,25 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         elif var in user_cat_vars:
             is_continuous = False
         else:
-            # Fallback
             is_continuous = pd.api.types.is_numeric_dtype(valid[var]) and (valid[var].nunique() > 20)
 
         # 1. 연속형 분석
         if is_continuous:
-            groups_data = [valid[valid[group_col] == g][var] for g in group_values]
+            # [CRITICAL FIX] 연속형이면 강제로 숫자로 변환 시도 (문자열이 섞여있으면 NaN 처리)
+            # 이렇게 해야 사용자가 문자열 변수를 실수로 연속형에 넣었을 때 에러가 안 남
+            try:
+                valid_numeric = pd.to_numeric(valid[var], errors='coerce')
+            except:
+                # 변환 실패 시 범주형으로 넘기거나 스킵해야 하지만, 여기선 NaN 처리된 상태로 진행
+                valid_numeric = valid[var]
+
+            # 그룹별 데이터 나누기 (숫자로 변환된 데이터 사용)
+            groups_data = [valid_numeric[valid[group_col] == g].dropna() for g in group_values]
             
+            # 데이터가 유효한지 체크 (모두 NaN이면 스킵)
+            if any(len(g) == 0 for g in groups_data):
+                continue # 계산 불가
+
             is_normal = True
             for g_dat in groups_data:
                 if len(g_dat) < 3: 
@@ -168,8 +180,10 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
 
             row = {'Characteristic': var}
             for g, g_name in zip(group_values, group_names):
-                sub = valid[valid[group_col] == g][var]
-                if is_normal:
+                sub = valid_numeric[valid[group_col] == g].dropna()
+                if len(sub) == 0:
+                    row[f"{g_name} (n={group_n[g]})"] = "NA"
+                elif is_normal:
                     row[f"{g_name} (n={group_n[g]})"] = f"{sub.mean():.1f} ± {sub.std():.1f}"
                 else:
                     row[f"{g_name} (n={group_n[g]})"] = f"{sub.median():.1f} [{sub.quantile(0.25):.1f}-{sub.quantile(0.75):.1f}]"
@@ -177,21 +191,25 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
             p = np.nan
             method = ""
             try:
-                if len(groups_data) == 2:
+                # 통계 검정 (유효한 데이터만 사용)
+                valid_groups = [g for g in groups_data if len(g) > 0]
+                if len(valid_groups) < 2:
+                    p = np.nan
+                elif len(valid_groups) == 2:
                     if is_normal:
-                        _, p_levene = stats.levene(*groups_data)
+                        _, p_levene = stats.levene(*valid_groups)
                         equal_var = (p_levene > 0.05)
-                        _, p = stats.ttest_ind(*groups_data, equal_var=equal_var)
+                        _, p = stats.ttest_ind(*valid_groups, equal_var=equal_var)
                         method = "T-test" if equal_var else "Welch's T-test"
                     else:
-                        _, p = stats.mannwhitneyu(*groups_data)
+                        _, p = stats.mannwhitneyu(*valid_groups)
                         method = "Mann-Whitney"
-                elif len(groups_data) > 2:
+                elif len(valid_groups) > 2:
                     if is_normal:
-                        _, p = stats.f_oneway(*groups_data)
+                        _, p = stats.f_oneway(*valid_groups)
                         method = "ANOVA"
                     else:
-                        _, p = stats.kruskal(*groups_data)
+                        _, p = stats.kruskal(*valid_groups)
                         method = "Kruskal-Wallis"
             except:
                 pass
@@ -203,6 +221,7 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         # 2. 범주형 분석
         else:
             try:
+                # 범주형은 무조건 문자열로 취급
                 ct = pd.crosstab(valid[group_col], valid[var].astype(str))
                 method = "Chi-square"
                 p = np.nan
@@ -378,19 +397,6 @@ if uploaded_file:
                     st.session_state['user_cont'] = auto_cont
                     st.session_state['user_cat'] = auto_cat
                     st.session_state['current_target_hash'] = state_key
-
-                # 2. 콜백 함수 (한쪽에서 선택하면 다른쪽에서 제거)
-                def on_cont_change():
-                    # Continuous에서 선택된 것들을 Categorical에서 제거
-                    new_cont = st.session_state.widget_cont
-                    st.session_state['user_cont'] = new_cont
-                    st.session_state['user_cat'] = [x for x in target_vars if x not in new_cont]
-
-                def on_cat_change():
-                    # Categorical에서 선택된 것들을 Continuous에서 제거
-                    new_cat = st.session_state.widget_cat
-                    st.session_state['user_cat'] = new_cat
-                    st.session_state['user_cont'] = [x for x in target_vars if x not in new_cat]
 
                 st.write("---")
                 st.markdown("#### ⚙️ 변수 타입 설정 (자동 연동)")
