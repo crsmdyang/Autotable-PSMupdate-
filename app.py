@@ -113,7 +113,7 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# --- Cox 분석 유틸리티 ---
+# --- Cox 분석 유틸리티 (구버전 복원) ---
 def drop_constant_cols(X):
     keep = [c for c in X.columns if X[c].nunique(dropna=True) > 1]
     return X[keep]
@@ -424,6 +424,8 @@ if uploaded_file:
                 del st.session_state['var_config_df']
             if 'current_target_hash' in st.session_state:
                 del st.session_state['current_target_hash']
+            if 'psm_var_config' in st.session_state:
+                del st.session_state['psm_var_config']
                 
             st.rerun()
         except Exception as e:
@@ -524,12 +526,11 @@ if uploaded_file:
                             else:
                                 st.dataframe(t1_res, use_container_width=True)
                                 output = io.BytesIO()
-                                # [수정] xlsxwriter 사용
                                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                                     t1_res.to_excel(writer, index=False)
                                 st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
 
-        # ------------------ TAB 2: Cox Regression (Old Logic restored) ------------------
+        # ------------------ TAB 2: Cox Regression ------------------
         with tab2:
             st.header("논문 Table: Factor / Subgroup / HR(95%CI) / p-value")
 
@@ -574,7 +575,6 @@ if uploaded_file:
                 if n_events < 5:
                     st.warning("이벤트 수가 매우 적습니다.")
 
-                # 1) Univariate
                 uni_sum_dict = {}; uni_na_vars = []; cat_info = {}
                 for var in variables:
                     try:
@@ -601,7 +601,6 @@ if uploaded_file:
                         uni_sum_dict[var] = cph.summary.copy()
                     except: uni_na_vars.append(var)
 
-                # Variable Selection
                 univariate_pvals = {}
                 for var, summ in uni_sum_dict.items():
                     if cat_info[var]["levels"] is None:
@@ -613,7 +612,6 @@ if uploaded_file:
                 selected_vars = [v for v, p in univariate_pvals.items() if p <= p_enter]
                 st.write(f"다변량 후보 변수(≤ {p_enter:.3f}): {selected_vars if selected_vars else '없음'}")
 
-                # 2) Multivariate
                 multi_sum = None; multi_na_vars = []; chosen_penalizer = penalizer
 
                 if len(selected_vars) >= 1:
@@ -645,7 +643,6 @@ if uploaded_file:
                             multi_na_vars = selected_vars
                     except: multi_na_vars = selected_vars
 
-                # 3) Output
                 rows = []
                 for var in variables:
                     rows.append({"Factor": var, "Subgroup": "", "Univariate analysis HR (95% CI)": "", "Multivariate analysis HR (95% CI)": ""})
@@ -682,7 +679,6 @@ if uploaded_file:
                 st.dataframe(res_df, use_container_width=True)
 
                 output = io.BytesIO()
-                # [수정] xlsxwriter 사용
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     res_df.to_excel(writer, index=False)
                 st.download_button("📥 Cox 결과 저장", output.getvalue(), "Cox_Result.xlsx")
@@ -762,7 +758,6 @@ if uploaded_file:
                                 st.pyplot(fig_forest)
 
                                 out_l = io.BytesIO()
-                                # [수정] xlsxwriter 사용
                                 with pd.ExcelWriter(out_l, engine='xlsxwriter') as writer:
                                     res_df.to_excel(writer, sheet_name="Logistic")
                                 st.download_button("📥 로지스틱 저장", out_l.getvalue(), "Logistic.xlsx")
@@ -814,36 +809,83 @@ if uploaded_file:
                                 st.pyplot(fig_love)
                                 
                                 out_psm = io.BytesIO()
-                                # [수정] xlsxwriter 사용 + errors='ignore'
                                 with pd.ExcelWriter(out_psm, engine='xlsxwriter') as writer:
                                     matched_df.drop(columns=['__T', 'logit_ps'], errors='ignore').to_excel(writer, index=False)
                                 st.download_button("📥 매칭 데이터 저장", out_psm.getvalue(), "Matched.xlsx")
 
-                                # Matched Table 1
+                                # [NEW] Matched Table 1 Section
                                 st.markdown("---")
                                 st.subheader("📊 Matched Cohort Baseline Table (Table 1)")
                                 
-                                auto_c, auto_cat = [], []
-                                for c in covariates:
-                                    if pd.api.types.is_numeric_dtype(matched_df[c]) and matched_df[c].nunique() > 20:
-                                        auto_c.append(c)
-                                    else:
-                                        auto_cat.append(c)
+                                # 1. 변수 선택 및 타입 설정용 데이터 준비
+                                # 원본의 모든 컬럼을 대상으로 함 (치료변수 제외)
+                                match_all_cols = [c for c in matched_df.columns if c not in [treat_col, 'propensity_score', '__T', 'logit_ps']]
                                 
+                                if 'psm_var_config' not in st.session_state:
+                                    psm_init_data = []
+                                    for col in match_all_cols:
+                                        # 기본값: 매칭에 쓴 변수(covariates)는 포함, 나머지는 미포함
+                                        is_inc = col in covariates
+                                        psm_init_data.append({
+                                            "Include": is_inc,
+                                            "Variable": col,
+                                            "Type": suggest_variable_type_single(matched_df, col)
+                                        })
+                                    st.session_state['psm_var_config'] = pd.DataFrame(psm_init_data)
+
+                                st.markdown("#### ⚙️ Matched Table 변수 설정")
+                                
+                                # 전체 선택/해제 버튼
+                                m_btn1, m_btn2, _ = st.columns([0.15, 0.15, 0.7])
+                                if m_btn1.button("✅ 전체 선택 (Matched)", key='psm_select_all'):
+                                    st.session_state['psm_var_config']['Include'] = True
+                                    st.rerun()
+                                if m_btn2.button("⬜ 전체 해제 (Matched)", key='psm_deselect_all'):
+                                    st.session_state['psm_var_config']['Include'] = False
+                                    st.rerun()
+
+                                # Data Editor로 변수 관리
+                                psm_edited_config = st.data_editor(
+                                    st.session_state['psm_var_config'],
+                                    column_config={
+                                        "Include": st.column_config.CheckboxColumn("Include?", width="small"),
+                                        "Variable": st.column_config.TextColumn("Variable", width="medium", disabled=True),
+                                        "Type": st.column_config.SelectboxColumn("Type", width="medium", options=["Continuous", "Categorical"])
+                                    },
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    num_rows="fixed",
+                                    key='psm_var_editor'
+                                )
+                                st.session_state['psm_var_config'] = psm_edited_config
+
+                                # 선택된 변수 필터링
+                                psm_sel_rows = psm_edited_config[psm_edited_config['Include'] == True]
+                                psm_target_vars = psm_sel_rows['Variable'].tolist()
+                                psm_user_cont = psm_sel_rows[psm_sel_rows['Type'] == 'Continuous']['Variable'].tolist()
+                                psm_user_cat = psm_sel_rows[psm_sel_rows['Type'] == 'Categorical']['Variable'].tolist()
+
+                                # 치료 변수 값 매핑
                                 mt_vals = matched_df[treat_col].unique()
                                 val_map = {v: str(v) for v in mt_vals}
-                                
-                                mt1, err = analyze_table1_robust(matched_df, treat_col, val_map, covariates, auto_c, auto_cat)
-                                
-                                if err:
-                                    st.error(f"Table 1 생성 오류: {err}")
-                                else:
-                                    st.dataframe(mt1, use_container_width=True)
-                                    out_mt1 = io.BytesIO()
-                                    # [수정] xlsxwriter 사용
-                                    with pd.ExcelWriter(out_mt1, engine='xlsxwriter') as writer:
-                                        mt1.to_excel(writer, index=False)
-                                    st.download_button("📥 Matched Table 1 저장", out_mt1.getvalue(), "Table1_Matched.xlsx")
+
+                                if st.button("Generate Matched Table 1", key='btn_gen_matched_t1'):
+                                    if not psm_target_vars:
+                                        st.warning("선택된 변수가 없습니다.")
+                                    else:
+                                        mt1, err = analyze_table1_robust(
+                                            matched_df, treat_col, val_map, 
+                                            psm_target_vars, psm_user_cont, psm_user_cat
+                                        )
+                                        
+                                        if err:
+                                            st.error(f"오류: {err}")
+                                        else:
+                                            st.dataframe(mt1, use_container_width=True)
+                                            out_mt1 = io.BytesIO()
+                                            with pd.ExcelWriter(out_mt1, engine='xlsxwriter') as w:
+                                                mt1.to_excel(w, index=False)
+                                            st.download_button("📥 Matched Table 1 저장", out_mt1.getvalue(), "Table1_Matched.xlsx")
 
         with tab_methods:
             st.header("📝 Methods")
