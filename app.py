@@ -132,7 +132,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         if valid.empty: continue
 
         # --- 변수 타입 결정 (사용자 설정 우선) ---
-        # 사용자가 명시적으로 Continuous 리스트에 넣었거나, Editor에서 선택한 경우
         if var in user_cont_vars:
             is_continuous = True
         elif var in user_cat_vars:
@@ -367,26 +366,35 @@ if uploaded_file:
             with col1:
                 selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
             
-            # [NEW] 통합 변수 관리자 (Unified Variable Manager)
-            # Multiselect 대신 DataEditor를 사용하여 변수 선택 및 타입 설정을 동시에 관리
+            # [NEW] 통합 변수 관리자
             all_cols = [c for c in df.columns if c != group_col]
             
-            # 설정 상태 초기화 (처음 한 번만)
+            # 설정 상태 초기화
             if 'var_config_df' not in st.session_state:
                 initial_data = []
                 for col in all_cols:
                     initial_data.append({
-                        "Include": True, # 기본적으로 포함
+                        "Include": True,
                         "Variable": col,
                         "Type": suggest_variable_type_single(df, col)
                     })
                 st.session_state['var_config_df'] = pd.DataFrame(initial_data)
             
-            # 설정 UI 표시
+            # UI 표시
             st.write("---")
             st.markdown("#### ⚙️ 분석 변수 및 타입 설정")
             st.caption("💡 **Include 체크를 해제**하면 분석에서 제외되며, 화면이 흔들리지 않습니다.")
             
+            # [NEW] 전체 선택/해제 버튼 (Data Editor 위에 배치)
+            col_btn1, col_btn2, _ = st.columns([0.15, 0.15, 0.7])
+            if col_btn1.button("✅ 전체 선택", key='btn_select_all'):
+                st.session_state['var_config_df']['Include'] = True
+                st.rerun()
+            
+            if col_btn2.button("⬜ 전체 해제", key='btn_deselect_all'):
+                st.session_state['var_config_df']['Include'] = False
+                st.rerun()
+
             edited_config = st.data_editor(
                 st.session_state['var_config_df'],
                 column_config={
@@ -399,7 +407,7 @@ if uploaded_file:
                     "Variable": st.column_config.TextColumn(
                         "Variable Name",
                         width="medium",
-                        disabled=True, # 변수명은 수정 불가
+                        disabled=True,
                     ),
                     "Type": st.column_config.SelectboxColumn(
                         "Data Type",
@@ -411,14 +419,14 @@ if uploaded_file:
                 },
                 hide_index=True,
                 use_container_width=True,
-                num_rows="fixed", # 행 추가/삭제 방지 (중요!)
+                num_rows="fixed", 
                 key='var_manager_editor'
             )
             
-            # 에디터 변경 사항 실시간 저장
+            # 에디터 변경 사항 저장
             st.session_state['var_config_df'] = edited_config
 
-            # 선택된 변수 및 타입 추출
+            # 선택된 변수 추출
             selected_rows = edited_config[edited_config['Include'] == True]
             target_vars = selected_rows['Variable'].tolist()
             user_cont_vars = selected_rows[selected_rows['Type'] == 'Continuous']['Variable'].tolist()
