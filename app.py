@@ -5,8 +5,8 @@ from scipy import stats
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
-from lifelines import CoxPHFitter, KaplanMeierFitter
-from lifelines.statistics import proportional_hazard_test, logrank_test
+from lifelines import CoxPHFitter
+from lifelines.statistics import proportional_hazard_test
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.linear_model import LogisticRegression
@@ -141,16 +141,13 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
 
         # 1. 연속형 분석
         if is_continuous:
-            # [안전장치] 연속형이면 강제로 숫자로 변환 시도
             try:
                 valid_numeric = pd.to_numeric(valid[var], errors='coerce')
             except:
                 valid_numeric = valid[var]
 
-            # 그룹별 데이터 나누기
             groups_data = [valid_numeric[valid[group_col] == g].dropna() for g in group_values]
             
-            # 유효성 체크
             if any(len(g) == 0 for g in groups_data):
                 continue 
 
@@ -345,10 +342,9 @@ if uploaded_file:
     df = st.session_state['df']
     st.divider()
 
-    # 탭 구성
-    tab1, tab_km, tab2, tab3, tab4, tab_methods = st.tabs([
+    # 탭 구성 (KM Curve 삭제됨)
+    tab1, tab2, tab3, tab4, tab_methods = st.tabs([
         "📊 Table 1 (기초통계)", 
-        "📈 KM Curve (생존분석)",
         "⏱️ Cox Regression", 
         "💊 Logistic Regression",
         "⚖️ PSM (매칭)",
@@ -366,7 +362,7 @@ if uploaded_file:
             with col1:
                 selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
             
-            # [NEW] 통합 변수 관리자
+            # 통합 변수 관리자
             all_cols = [c for c in df.columns if c != group_col]
             
             # 설정 상태 초기화
@@ -385,7 +381,7 @@ if uploaded_file:
             st.markdown("#### ⚙️ 분석 변수 및 타입 설정")
             st.caption("💡 **Include 체크를 해제**하면 분석에서 제외되며, 화면이 흔들리지 않습니다.")
             
-            # [NEW] 전체 선택/해제 버튼 (Data Editor 위에 배치)
+            # 전체 선택/해제 버튼
             col_btn1, col_btn2, _ = st.columns([0.15, 0.15, 0.7])
             if col_btn1.button("✅ 전체 선택", key='btn_select_all'):
                 st.session_state['var_config_df']['Include'] = True
@@ -451,47 +447,6 @@ if uploaded_file:
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                                 t1_res.to_excel(writer, index=False)
                             st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
-
-    # ------------------ TAB KM ------------------
-    with tab_km:
-        st.subheader("📈 Kaplan-Meier Survival Analysis")
-        km_c1, km_c2 = st.columns(2)
-        km_time = km_c1.selectbox("Time (생존기간)", df.columns, key='km_t')
-        km_event = km_c2.selectbox("Event (사건발생)", df.columns, key='km_e')
-        km_group = st.selectbox("그룹 변수 (Stratify)", [c for c in df.columns if c not in [km_time, km_event]], key='km_g')
-        
-        if st.button("KM Curve 그리기"):
-            try:
-                df_km = df[[km_time, km_event, km_group]].dropna()
-                df_km[km_time] = pd.to_numeric(df_km[km_time], errors='coerce')
-                
-                kmf = KaplanMeierFitter()
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                groups = df_km[km_group].unique()
-                for g in groups:
-                    mask = df_km[km_group] == g
-                    kmf.fit(df_km.loc[mask, km_time], df_km.loc[mask, km_event], label=str(g))
-                    kmf.plot_survival_function(ax=ax)
-                
-                plt.title(f"Survival Curve by {km_group}")
-                plt.ylabel("Survival Probability")
-                st.pyplot(fig)
-                
-                if len(groups) == 2:
-                    g1 = groups[0]
-                    g2 = groups[1]
-                    res = logrank_test(
-                        df_km.loc[df_km[km_group]==g1, km_time], 
-                        df_km.loc[df_km[km_group]==g2, km_time],
-                        event_observed_A=df_km.loc[df_km[km_group]==g1, km_event],
-                        event_observed_B=df_km.loc[df_km[km_group]==g2, km_event]
-                    )
-                    st.success(f"Log-rank Test p-value: {format_p(res.p_value)}")
-                else:
-                    st.warning("Log-rank test는 현재 2개 그룹 비교만 지원합니다.")
-            except Exception as e:
-                st.error(f"분석 오류: {e}")
 
     # ------------------ TAB 2: Cox Regression ------------------
     with tab2:
