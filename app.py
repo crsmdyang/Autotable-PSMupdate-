@@ -104,15 +104,31 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# ================== 2. Table 1 로직 (컬럼 순서 고정) ==================
+# ================== 2. Table 1 로직 (사용자 지정 타입 반영) ==================
 
-def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
+def suggest_variable_types(df, target_cols, threshold=20):
+    """초기 변수 타입 제안 (연속형 vs 범주형)"""
+    cont_vars = []
+    cat_vars = []
+    
+    for var in target_cols:
+        is_numeric = pd.api.types.is_numeric_dtype(df[var])
+        many_unique = df[var].nunique() > threshold
+        
+        if is_numeric and many_unique:
+            cont_vars.append(var)
+        else:
+            cat_vars.append(var)
+            
+    return cont_vars, cat_vars
+
+def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars, user_cat_vars):
     result_rows = []
     group_values = list(value_map.keys())
     group_names = list(value_map.values())
     group_n = {g: (df[group_col] == g).sum() for g in group_values}
     
-    # [중요] 최종 출력할 컬럼 순서 미리 정의 (변수명 -> 그룹들 -> p-value -> method)
+    # 최종 출력할 컬럼 순서
     final_col_order = ['Characteristic']
     for g, g_name in zip(group_values, group_names):
         final_col_order.append(f"{g_name} (n={group_n[g]})")
@@ -124,13 +140,20 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
         valid = df[df[group_col].isin(group_values)].dropna(subset=[var])
         if valid.empty: continue
 
-        is_numeric_type = pd.api.types.is_numeric_dtype(valid[var])
-        many_unique = valid[var].nunique() > threshold
+        # --- 변수 타입 결정 (사용자 설정 우선) ---
+        if var in user_cont_vars:
+            is_continuous = True
+        elif var in user_cat_vars:
+            is_continuous = False
+        else:
+            # Fallback: 어느 리스트에도 없으면 기본 로직
+            is_continuous = pd.api.types.is_numeric_dtype(valid[var]) and (valid[var].nunique() > 20)
 
-        # 연속형 변수
-        if is_numeric_type and many_unique:
+        # ------------------ 1. 연속형 분석 (Continuous) ------------------
+        if is_continuous:
             groups_data = [valid[valid[group_col] == g][var] for g in group_values]
             
+            # 정규성 검정 (N < 5000 일 때만 수행, 너무 크면 비효율적)
             is_normal = True
             for g_dat in groups_data:
                 if len(g_dat) < 3: 
@@ -142,6 +165,7 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
                         if p_norm < 0.05: is_normal = False
                     except:
                         is_normal = False
+            # *사용자가 강제로 연속형으로 지정했어도, 정규성 만족 여부에 따라 T-test/Mann-Whitney 나뉨
 
             row = {'Characteristic': var}
             for g, g_name in zip(group_values, group_names):
@@ -177,10 +201,12 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
             row['Test Method'] = method
             result_rows.append(row)
 
-        # 범주형 변수
+        # ------------------ 2. 범주형 분석 (Categorical) ------------------
         else:
             try:
-                ct = pd.crosstab(valid[group_col], valid[var])
+                # 안전한 Crosstab (Mixed Type 에러 방지를 위해 str 변환)
+                ct = pd.crosstab(valid[group_col], valid[var].astype(str))
+                
                 method = "Chi-square"
                 p = np.nan
                 
@@ -193,7 +219,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
                 else:
                     _, p, _, _ = stats.chi2_contingency(ct)
 
-                # [수정] 헤더 행 생성 시 그룹 컬럼을 중간에 배치
                 row_head = {'Characteristic': var}
                 for g, g_name in zip(group_values, group_names):
                     row_head[f"{g_name} (n={group_n[g]})"] = ""
@@ -202,11 +227,11 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
                 
                 result_rows.append(row_head)
 
-                unique_levels = sorted(valid[var].unique()) 
+                unique_levels = sorted(valid[var].astype(str).unique()) 
                 for val in unique_levels:
                     row_sub = {'Characteristic': f"  {val}"}
                     for g, g_name in zip(group_values, group_names):
-                        cnt = valid[(valid[group_col] == g) & (valid[var] == val)].shape[0]
+                        cnt = valid[(valid[group_col] == g) & (valid[var].astype(str) == val)].shape[0]
                         total = group_n[g]
                         pct = (cnt / total * 100) if total > 0 else 0
                         row_sub[f"{g_name} (n={group_n[g]})"] = f"{cnt} ({pct:.1f}%)"
@@ -214,26 +239,13 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, threshold=20):
                     row_sub['Test Method'] = ""
                     result_rows.append(row_sub)
 
-            except TypeError as e:
-                error_msg = str(e)
-                if "not supported between instances" in error_msg or "orderable" in error_msg or "mixed types" in error_msg.lower():
-                    types_found = valid[var].apply(type).unique()
-                    types_str = [t.__name__ for t in types_found]
-                    return None, {
-                        "type": "mixed_type",
-                        "var": var,
-                        "types": types_str,
-                        "examples": valid[var].unique()[:5]
-                    }
-                else:
-                    return None, {"type": "unknown", "var": var, "msg": error_msg}
             except Exception as e:
+                # 에러 발생 시 로그만 남기고 스킵 (사용자 에디터 유도)
                 return None, {"type": "unknown", "var": var, "msg": str(e)}
 
-    # [중요] 최종 DataFrame 생성 후 컬럼 순서 강제 재배열
+    # 최종 결과 DataFrame
     df_res = pd.DataFrame(result_rows)
     if not df_res.empty:
-        # 존재하는 컬럼만 선택하여 순서 적용
         cols_to_use = [c for c in final_col_order if c in df_res.columns]
         df_res = df_res[cols_to_use]
 
@@ -357,22 +369,40 @@ if uploaded_file:
             with col1:
                 selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
             
-            # [NEW] 분석할 변수 선택 기능
+            # 분석할 변수 선택
             all_cols = [c for c in df.columns if c != group_col]
             with col2:
                 target_vars = st.multiselect("분석에 포함할 변수 선택 (기본: 전체)", all_cols, default=all_cols)
+
+            # [NEW] 변수 타입 설정 (자동 제안 + 사용자 수정)
+            if target_vars:
+                with st.expander("⚙️ 변수 타입 상세 설정 (연속형 vs 범주형)", expanded=False):
+                    # 초기값 제안
+                    auto_cont, auto_cat = suggest_variable_types(df, target_vars)
+                    
+                    st.caption("자동으로 분류된 타입을 확인하고, 필요하면 위치를 옮기세요.")
+                    c_type1, c_type2 = st.columns(2)
+                    
+                    user_cont_vars = c_type1.multiselect("📏 연속형 변수 (Mean/Median)", options=target_vars, default=auto_cont)
+                    user_cat_vars = c_type2.multiselect("📦 범주형 변수 (n(%))", options=target_vars, default=auto_cat)
+                    
+                    # 중복 경고
+                    overlap = set(user_cont_vars) & set(user_cat_vars)
+                    if overlap:
+                        st.warning(f"⚠️ 다음 변수가 두 목록에 모두 포함되어 있습니다 (연속형으로 처리됨): {overlap}")
 
             value_map = {v: str(v) for v in selected_vals}
             
             if len(selected_vals) >= 2 and target_vars:
                 if st.button("Table 1 생성", key='btn_t1'):
                     with st.spinner("분석 중... (정규성 검정 포함)"):
-                        t1_res, error_info = analyze_table1_robust(df, group_col, value_map, target_vars)
+                        # 사용자 설정 변수 리스트 전달
+                        t1_res, error_info = analyze_table1_robust(df, group_col, value_map, target_vars, user_cont_vars, user_cat_vars)
                         
                         if error_info:
                             st.error(f"🚨 **데이터 오류 발생: '{error_info['var']}' 컬럼**")
                             st.warning(f"맨 위 에디터에서 '{error_info['var']}' 값을 통일해주세요. (숫자/문자 혼합됨)")
-                            st.write(f"타입: {error_info['types']}, 예시: {list(error_info['examples'])}")
+                            st.write(f"오류 내용: {error_info['msg']}")
                         else:
                             st.dataframe(t1_res, use_container_width=True)
                             output = io.BytesIO()
