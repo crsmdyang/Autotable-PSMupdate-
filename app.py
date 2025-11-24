@@ -12,6 +12,7 @@ import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
+import xlsxwriter # 엑셀 저장 엔진 명시
 
 # ================== 페이지 설정 ==================
 st.set_page_config(page_title="Dr.Stats Ultimate: Medical Statistics", layout="wide")
@@ -113,7 +114,7 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# --- Cox 분석 유틸리티 (구버전 복원) ---
+# --- Cox 분석 유틸리티 ---
 def drop_constant_cols(X):
     keep = [c for c in X.columns if X[c].nunique(dropna=True) > 1]
     return X[keep]
@@ -420,12 +421,11 @@ if uploaded_file:
             st.session_state['df'] = df_load
             st.session_state['current_file_id'] = file_id
             
-            if 'var_config_df' in st.session_state:
-                del st.session_state['var_config_df']
-            if 'current_target_hash' in st.session_state:
-                del st.session_state['current_target_hash']
-            if 'psm_var_config' in st.session_state:
-                del st.session_state['psm_var_config']
+            # 파일 변경 시 모든 설정 초기화
+            keys_to_clear = ['var_config_df', 'current_target_hash', 'psm_var_config', 'psm_done', 'psm_matched_df', 'psm_original_w_score']
+            for k in keys_to_clear:
+                if k in st.session_state:
+                    del st.session_state[k]
                 
             st.rerun()
         except Exception as e:
@@ -783,6 +783,7 @@ if uploaded_file:
                 covariates = st.multiselect("매칭 공변량", [c for c in df.columns if c != treat_col], key='psm_cov')
                 caliper = st.slider("Caliper", 0.0, 1.0, 0.2, 0.05)
                 
+                # PSM 실행 버튼 (상태 관리)
                 if st.button("PSM 실행", key='btn_psm'):
                     if not covariates:
                         st.error("공변량을 선택하세요.")
@@ -795,97 +796,111 @@ if uploaded_file:
                             if matched_df is None:
                                 st.error("매칭 실패: 조건을 완화하세요.")
                             else:
-                                st.success(f"매칭 완료! (N={len(matched_df)})")
-                                
-                                smd_before = calculate_smd(original_w_score, '__T', covariates)
-                                smd_after = calculate_smd(matched_df, '__T', covariates)
-                                smd_merge = pd.merge(smd_before, smd_after, on='Variable', suffixes=('_Before', '_After'))
-                                st.dataframe(smd_merge.style.format({'SMD_Before': '{:.3f}', 'SMD_After': '{:.3f}'}))
-                                
-                                fig_love, ax_love = plt.subplots(figsize=(8, len(covariates)*0.5 + 2))
-                                sns.scatterplot(data=smd_merge, x='SMD_Before', y='Variable', label='Before', color='red')
-                                sns.scatterplot(data=smd_merge, x='SMD_After', y='Variable', label='After', color='blue')
-                                plt.axvline(0.1, color='gray', linestyle='--')
-                                st.pyplot(fig_love)
-                                
-                                out_psm = io.BytesIO()
-                                with pd.ExcelWriter(out_psm, engine='xlsxwriter') as writer:
-                                    matched_df.drop(columns=['__T', 'logit_ps'], errors='ignore').to_excel(writer, index=False)
-                                st.download_button("📥 매칭 데이터 저장", out_psm.getvalue(), "Matched.xlsx")
+                                # 결과를 세션에 저장
+                                st.session_state['psm_matched_df'] = matched_df
+                                st.session_state['psm_original_w_score'] = original_w_score
+                                st.session_state['psm_covariates'] = covariates
+                                st.session_state['psm_treat_col'] = treat_col
+                                st.session_state['psm_done'] = True
+                
+                # 결과가 있으면 표시 (버튼 클릭과 무관하게 유지됨)
+                if st.session_state.get('psm_done'):
+                    matched_df = st.session_state['psm_matched_df']
+                    original_w_score = st.session_state['psm_original_w_score']
+                    covariates = st.session_state['psm_covariates']
+                    
+                    st.success(f"매칭 완료! (N={len(matched_df)})")
+                    
+                    # 1. Balance Check
+                    smd_before = calculate_smd(original_w_score, '__T', covariates)
+                    smd_after = calculate_smd(matched_df, '__T', covariates)
+                    smd_merge = pd.merge(smd_before, smd_after, on='Variable', suffixes=('_Before', '_After'))
+                    st.dataframe(smd_merge.style.format({'SMD_Before': '{:.3f}', 'SMD_After': '{:.3f}'}))
+                    
+                    # 2. Love Plot
+                    fig_love, ax_love = plt.subplots(figsize=(8, len(covariates)*0.5 + 2))
+                    sns.scatterplot(data=smd_merge, x='SMD_Before', y='Variable', label='Before', color='red')
+                    sns.scatterplot(data=smd_merge, x='SMD_After', y='Variable', label='After', color='blue')
+                    plt.axvline(0.1, color='gray', linestyle='--')
+                    st.pyplot(fig_love)
+                    
+                    out_psm = io.BytesIO()
+                    with pd.ExcelWriter(out_psm, engine='xlsxwriter') as writer:
+                        matched_df.drop(columns=['__T', 'logit_ps'], errors='ignore').to_excel(writer, index=False)
+                    st.download_button("📥 매칭 데이터 저장", out_psm.getvalue(), "Matched.xlsx")
 
-                                # [NEW] Matched Table 1 Section
-                                st.markdown("---")
-                                st.subheader("📊 Matched Cohort Baseline Table (Table 1)")
-                                
-                                # 1. 변수 선택 및 타입 설정용 데이터 준비
-                                # 원본의 모든 컬럼을 대상으로 함 (치료변수 제외)
-                                match_all_cols = [c for c in matched_df.columns if c not in [treat_col, 'propensity_score', '__T', 'logit_ps']]
-                                
-                                if 'psm_var_config' not in st.session_state:
-                                    psm_init_data = []
-                                    for col in match_all_cols:
-                                        # 기본값: 매칭에 쓴 변수(covariates)는 포함, 나머지는 미포함
-                                        is_inc = col in covariates
-                                        psm_init_data.append({
-                                            "Include": is_inc,
-                                            "Variable": col,
-                                            "Type": suggest_variable_type_single(matched_df, col)
-                                        })
-                                    st.session_state['psm_var_config'] = pd.DataFrame(psm_init_data)
+                    # [NEW] Matched Table 1 Section
+                    st.markdown("---")
+                    st.subheader("📊 Matched Cohort Baseline Table (Table 1)")
+                    
+                    # 매칭 결과에 있는 컬럼들 (치료변수 및 매칭용 임시변수 제외)
+                    match_all_cols = [c for c in matched_df.columns if c not in [treat_col, 'propensity_score', '__T', 'logit_ps']]
+                    
+                    if 'psm_var_config' not in st.session_state:
+                        psm_init_data = []
+                        for col in match_all_cols:
+                            # 기본값: 매칭에 사용된 공변량은 포함
+                            is_inc = col in covariates
+                            psm_init_data.append({
+                                "Include": is_inc,
+                                "Variable": col,
+                                "Type": suggest_variable_type_single(matched_df, col)
+                            })
+                        st.session_state['psm_var_config'] = pd.DataFrame(psm_init_data)
 
-                                st.markdown("#### ⚙️ Matched Table 변수 설정")
-                                
-                                # 전체 선택/해제 버튼
-                                m_btn1, m_btn2, _ = st.columns([0.15, 0.15, 0.7])
-                                if m_btn1.button("✅ 전체 선택 (Matched)", key='psm_select_all'):
-                                    st.session_state['psm_var_config']['Include'] = True
-                                    st.rerun()
-                                if m_btn2.button("⬜ 전체 해제 (Matched)", key='psm_deselect_all'):
-                                    st.session_state['psm_var_config']['Include'] = False
-                                    st.rerun()
+                    st.markdown("#### ⚙️ Matched Table 변수 설정")
+                    
+                    # 전체 선택/해제 버튼
+                    m_btn1, m_btn2, _ = st.columns([0.15, 0.15, 0.7])
+                    if m_btn1.button("✅ 전체 선택 (Matched)", key='psm_select_all'):
+                        st.session_state['psm_var_config']['Include'] = True
+                        st.rerun()
+                    if m_btn2.button("⬜ 전체 해제 (Matched)", key='psm_deselect_all'):
+                        st.session_state['psm_var_config']['Include'] = False
+                        st.rerun()
 
-                                # Data Editor로 변수 관리
-                                psm_edited_config = st.data_editor(
-                                    st.session_state['psm_var_config'],
-                                    column_config={
-                                        "Include": st.column_config.CheckboxColumn("Include?", width="small"),
-                                        "Variable": st.column_config.TextColumn("Variable", width="medium", disabled=True),
-                                        "Type": st.column_config.SelectboxColumn("Type", width="medium", options=["Continuous", "Categorical"])
-                                    },
-                                    hide_index=True,
-                                    use_container_width=True,
-                                    num_rows="fixed",
-                                    key='psm_var_editor'
-                                )
-                                st.session_state['psm_var_config'] = psm_edited_config
+                    # Data Editor
+                    psm_edited_config = st.data_editor(
+                        st.session_state['psm_var_config'],
+                        column_config={
+                            "Include": st.column_config.CheckboxColumn("Include?", width="small"),
+                            "Variable": st.column_config.TextColumn("Variable", width="medium", disabled=True),
+                            "Type": st.column_config.SelectboxColumn("Type", width="medium", options=["Continuous", "Categorical"])
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        key='psm_var_editor'
+                    )
+                    st.session_state['psm_var_config'] = psm_edited_config
 
-                                # 선택된 변수 필터링
-                                psm_sel_rows = psm_edited_config[psm_edited_config['Include'] == True]
-                                psm_target_vars = psm_sel_rows['Variable'].tolist()
-                                psm_user_cont = psm_sel_rows[psm_sel_rows['Type'] == 'Continuous']['Variable'].tolist()
-                                psm_user_cat = psm_sel_rows[psm_sel_rows['Type'] == 'Categorical']['Variable'].tolist()
+                    # 선택된 변수 필터링
+                    psm_sel_rows = psm_edited_config[psm_edited_config['Include'] == True]
+                    psm_target_vars = psm_sel_rows['Variable'].tolist()
+                    psm_user_cont = psm_sel_rows[psm_sel_rows['Type'] == 'Continuous']['Variable'].tolist()
+                    psm_user_cat = psm_sel_rows[psm_sel_rows['Type'] == 'Categorical']['Variable'].tolist()
 
-                                # 치료 변수 값 매핑
-                                mt_vals = matched_df[treat_col].unique()
-                                val_map = {v: str(v) for v in mt_vals}
+                    # 치료 변수 값 매핑
+                    mt_vals = matched_df[treat_col].unique()
+                    val_map = {v: str(v) for v in mt_vals}
 
-                                if st.button("Generate Matched Table 1", key='btn_gen_matched_t1'):
-                                    if not psm_target_vars:
-                                        st.warning("선택된 변수가 없습니다.")
-                                    else:
-                                        mt1, err = analyze_table1_robust(
-                                            matched_df, treat_col, val_map, 
-                                            psm_target_vars, psm_user_cont, psm_user_cat
-                                        )
-                                        
-                                        if err:
-                                            st.error(f"오류: {err}")
-                                        else:
-                                            st.dataframe(mt1, use_container_width=True)
-                                            out_mt1 = io.BytesIO()
-                                            with pd.ExcelWriter(out_mt1, engine='xlsxwriter') as w:
-                                                mt1.to_excel(w, index=False)
-                                            st.download_button("📥 Matched Table 1 저장", out_mt1.getvalue(), "Table1_Matched.xlsx")
+                    if st.button("Generate Matched Table 1", key='btn_gen_matched_t1'):
+                        if not psm_target_vars:
+                            st.warning("선택된 변수가 없습니다.")
+                        else:
+                            mt1, err = analyze_table1_robust(
+                                matched_df, treat_col, val_map, 
+                                psm_target_vars, psm_user_cont, psm_user_cat
+                            )
+                            
+                            if err:
+                                st.error(f"오류: {err}")
+                            else:
+                                st.dataframe(mt1, use_container_width=True)
+                                out_mt1 = io.BytesIO()
+                                with pd.ExcelWriter(out_mt1, engine='xlsxwriter') as writer:
+                                    mt1.to_excel(writer, index=False)
+                                st.download_button("📥 Matched Table 1 저장", out_mt1.getvalue(), "Table1_Matched.xlsx")
 
         with tab_methods:
             st.header("📝 Methods")
