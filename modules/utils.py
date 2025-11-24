@@ -53,6 +53,51 @@ def suggest_variable_type_single(df, var, threshold=20):
     many_unique = df[var].nunique() > threshold
     return "Continuous" if (is_numeric and many_unique) else "Categorical"
 
+# ----- Forest Plot (오류 수정됨) -----
+def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
+    """Forest Plot 그리기 (안전 장치 추가)"""
+    df_plot = df_res.iloc[::-1].copy()
+    
+    fig, ax = plt.subplots(figsize=(6, len(df_plot) * 0.5 + 2))
+    
+    y_pos = np.arange(len(df_plot))
+    
+    # 1. Effect Size (HR or OR) - 보통 첫 번째 컬럼
+    mid = df_plot[effect_col] if effect_col in df_plot.columns else df_plot.iloc[:, 0]
+    
+    # 2. CI Lower/Upper 찾기
+    try:
+        # 이름으로 찾기 시도
+        lo_candidates = [c for c in df_plot.columns if any(x in c.lower() for x in ['lower', 'lo', 'min', '0'])]
+        hi_candidates = [c for c in df_plot.columns if any(x in c.lower() for x in ['upper', 'hi', 'max', '1'])]
+        
+        # 이름으로 못 찾으면 위치(Index)로 강제 할당 (보통 2번째, 3번째가 CI임)
+        if lo_candidates and hi_candidates:
+            lo = df_plot[lo_candidates[0]]
+            hi = df_plot[hi_candidates[0]]
+        else:
+            # Fallback: 컬럼 위치 기반 (0:OR, 1:Lower, 2:Upper, 3:P-val 라고 가정)
+            if df_plot.shape[1] >= 3:
+                lo = df_plot.iloc[:, 1]
+                hi = df_plot.iloc[:, 2]
+            else:
+                raise ValueError("Columns not found")
+
+        # 에러바 그리기
+        xerr = [mid - lo, hi - mid]
+        ax.errorbar(mid, y_pos, xerr=xerr, fmt='o', color='black', ecolor='gray', capsize=5)
+        
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(df_plot.index)
+        ax.axvline(1, color='red', linestyle='--')
+        ax.set_xlabel(f"{effect_col} (95% CI)")
+        ax.set_title(title)
+        
+    except Exception as e:
+        ax.text(0.5, 0.5, f"Plot Error: {str(e)}", ha='center')
+    
+    return fig
+
 # ----- 통계 분석 (Table 1) -----
 def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars, user_cat_vars):
     result_rows = []
@@ -182,33 +227,6 @@ def select_penalizer_by_cv(X_all, time_col, event_col, grid=(0.0, 0.01, 0.05, 0.
     best_pen = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[0][0]
     return best_pen, scores
 
-# ----- Logistic & Plots -----
-def check_vif(X):
-    if "const" not in X.columns: X_const = sm.add_constant(X)
-    else: X_const = X
-    X_numeric = X_const.select_dtypes(include=[np.number]).dropna()
-    if X_numeric.empty: return pd.DataFrame({'Variable': [], 'VIF': []})
-    vif_data = pd.DataFrame()
-    vif_data["Variable"] = X_numeric.columns
-    try: vif_data["VIF"] = [variance_inflation_factor(X_numeric.values, i) for i in range(X_numeric.shape[1])]
-    except: vif_data["VIF"] = "Error"
-    return vif_data[vif_data["Variable"] != "const"]
-
-def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
-    df_plot = df_res.iloc[::-1].copy()
-    fig, ax = plt.subplots(figsize=(6, len(df_plot) * 0.5 + 2))
-    y_pos = np.arange(len(df_plot))
-    mid = df_plot[effect_col] if effect_col in df_plot.columns else df_plot.iloc[:, 0]
-    lo_col = [c for c in df_plot.columns if "lower" in c.lower() or "0" in str(c) or "Lower" in c][0]
-    hi_col = [c for c in df_plot.columns if "upper" in c.lower() or "1" in str(c) or "Upper" in c][0]
-    lo = df_plot[lo_col]; hi = df_plot[hi_col]
-    xerr = [mid - lo, hi - mid]
-    ax.errorbar(mid, y_pos, xerr=xerr, fmt='o', color='black', ecolor='gray', capsize=5)
-    ax.set_yticks(y_pos); ax.set_yticklabels(df_plot.index)
-    ax.axvline(1, color='red', linestyle='--')
-    ax.set_xlabel(f"{effect_col} (95% CI)"); ax.set_title(title)
-    return fig
-
 # ----- PSM -----
 def calculate_smd(df, treatment_col, covariate_cols):
     smd_data = []
@@ -256,7 +274,6 @@ def run_psm(df, treatment_col, covariates, caliper=0.2):
     
     if not matched_indices: return None, None
     matched_df = pd.concat([data.loc[[x[0] for x in matched_indices]], data.loc[[x[1] for x in matched_indices]]])
-    # 원본 데이터 복원
     matched_df_full = df.loc[matched_df.index].copy()
     matched_df_full['propensity_score'] = matched_df['propensity_score']
     return matched_df_full, data
