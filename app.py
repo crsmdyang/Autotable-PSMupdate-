@@ -78,7 +78,7 @@ def make_dummies(df_in, var, levels):
     dmy.index = df_in.index
     return dmy
 
-# ================== 2. Table 1 로직 (User Guide 추가) ==================
+# ================== 2. Table 1 로직 (에러 핸들링 강화) ==================
 
 def analyze_table1_robust(df, group_col, value_map, threshold=20):
     result_rows = []
@@ -93,14 +93,11 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
         if valid.empty: continue
 
         # --- 연속형/범주형 판단 ---
-        # 1. 숫자형인지 확인
         is_numeric_type = pd.api.types.is_numeric_dtype(valid[var])
-        # 2. 고유값이 threshold보다 많은지
         many_unique = valid[var].nunique() > threshold
 
-        # 연속형 변수로 처리할 조건
+        # 연속형 변수 처리
         if is_numeric_type and many_unique:
-            # 정규성 검정 및 그룹별 데이터 추출
             groups_data = [valid[valid[group_col] == g][var] for g in group_values]
             
             is_normal = True
@@ -151,12 +148,10 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
 
         # --- 범주형 변수 처리 ---
         else:
-            # [중요] Mixed Type 오류 감지 및 사용자 안내
             try:
-                # 안전하게 Crosstab 시도
+                # Crosstab 시도 (여기서 타입 혼합 에러 발생 가능)
                 ct = pd.crosstab(valid[group_col], valid[var])
                 
-                # 통계 검정
                 method = "Chi-square"
                 p = np.nan
                 
@@ -169,13 +164,12 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
                 else:
                     _, p, _, _ = stats.chi2_contingency(ct)
 
-                # 결과 저장
                 row_head = {'Characteristic': var, 'p-value': format_p(p), 'Test Method': method}
                 for g, g_name in zip(group_values, group_names):
                     row_head[f"{g_name} (n={group_n[g]})"] = ""
                 result_rows.append(row_head)
 
-                # 하위 레벨 정렬 (여기서도 오류 날 수 있음)
+                # 하위 레벨 정렬 (여기서도 에러 발생 가능)
                 unique_levels = sorted(valid[var].unique()) 
                 
                 for val in unique_levels:
@@ -192,8 +186,8 @@ def analyze_table1_robust(df, group_col, value_map, threshold=20):
             except TypeError as e:
                 # Mixed Type 오류 발생 시, 분석을 중단하고 오류 정보를 리턴
                 error_msg = str(e)
-                if "not supported between instances" in error_msg or "orderable" in error_msg:
-                    # 데이터 타입 확인
+                # Pandas/Numpy 정렬 에러 메시지 패턴 확인
+                if "not supported between instances" in error_msg or "orderable" in error_msg or "mixed types" in error_msg.lower():
                     types_found = valid[var].apply(type).unique()
                     types_str = [t.__name__ for t in types_found]
                     
@@ -286,13 +280,18 @@ st.markdown("---")
 uploaded_file = st.file_uploader("📂 데이터 파일 업로드 (Excel/CSV)", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    # 1. 초기 데이터 로드 (세션 상태가 없으면 로드)
+    if 'df' not in st.session_state:
+        if uploaded_file.name.endswith('.csv'):
+            df_load = pd.read_csv(uploaded_file)
+        else:
+            df_load = pd.read_excel(uploaded_file)
+        df_load.columns = df_load.columns.astype(str).str.strip()
+        st.session_state['df'] = df_load
     
-    df.columns = df.columns.astype(str).str.strip()
-    st.session_state['df'] = df
+    # 2. 항상 세션 상태의 df를 사용 (수정 사항 반영을 위해)
+    df = st.session_state['df']
+    
     st.success(f"데이터 로드 완료: 총 {df.shape[0]} 행, {df.shape[1]} 열")
     
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -317,27 +316,39 @@ if uploaded_file:
             if len(selected_vals) >= 2:
                 if st.button("Table 1 생성", key='btn_t1'):
                     with st.spinner("분석 중... (정규성 검정 포함)"):
-                        # [수정] 결과와 에러를 함께 받음
                         t1_res, error_info = analyze_table1_robust(df, group_col, value_map)
                         
                         if error_info:
-                            # [중요] 사용자 가이드 출력
+                            # 🚨 에러 발생 시 수정 UI 표시
+                            st.error(f"🚨 **데이터 오류: '{error_info['var']}' 컬럼**")
+                            
                             if error_info['type'] == 'mixed_type':
-                                st.error(f"🚨 **데이터 오류 감지: '{error_info['var']}' 컬럼**")
                                 st.warning(
-                                    f"해당 변수에 **숫자**와 **문자**가 섞여 있어 분석할 수 없습니다.\n\n"
-                                    f"**감지된 데이터 타입:** {error_info['types']}\n"
-                                    f"**데이터 예시:** {list(error_info['examples'])}\n\n"
-                                    f"💡 **해결 방법:**\n"
-                                    f"1. 엑셀 파일을 엽니다.\n"
-                                    f"2. '{error_info['var']}' 컬럼을 찾습니다.\n"
-                                    f"3. 숫자로 된 값(예: 1, 0)과 문자(예: 'Unknown', 'Yes')가 섞여있는지 확인합니다.\n"
-                                    f"4. 값을 통일하거나 제거한 후 다시 업로드해주세요."
+                                    f"숫자와 문자가 섞여 있어 분석이 중단되었습니다.\n"
+                                    f"아래 표에서 직접 데이터를 수정하고 **[수정 완료 및 재실행]** 버튼을 누르세요."
                                 )
+                                
+                                # 수정할 데이터 준비 (그룹 변수와 문제 변수만 표시)
+                                st.markdown(f"### ✏️ 데이터 직접 수정하기 ({error_info['var']})")
+                                cols_to_edit = [group_col, error_info['var']]
+                                
+                                # data_editor 출력
+                                edited_subset = st.data_editor(
+                                    df[cols_to_edit], 
+                                    key=f"editor_{error_info['var']}",
+                                    num_rows="dynamic",
+                                    use_container_width=True
+                                )
+                                
+                                if st.button("✅ 수정 완료 및 재실행", type="primary"):
+                                    # 세션 상태 업데이트
+                                    st.session_state['df'][error_info['var']] = edited_subset[error_info['var']]
+                                    st.success("수정 사항이 반영되었습니다. 페이지가 새로고침됩니다.")
+                                    st.rerun()
                             else:
-                                st.error(f"분석 중 알 수 없는 오류가 발생했습니다: {error_info['msg']}")
+                                st.error(f"알 수 없는 오류: {error_info['msg']}")
                         else:
-                            # 성공 시 출력
+                            # ✅ 성공 시 결과 표시
                             st.dataframe(t1_res, use_container_width=True)
                             output = io.BytesIO()
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
