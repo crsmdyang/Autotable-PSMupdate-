@@ -113,7 +113,7 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
     
     return fig
 
-# --- Cox 분석 유틸리티 (구버전 복원) ---
+# --- Cox 분석 유틸리티 ---
 def drop_constant_cols(X):
     keep = [c for c in X.columns if X[c].nunique(dropna=True) > 1]
     return X[keep]
@@ -562,20 +562,13 @@ if uploaded_file:
 
             penalizer = st.number_input("penalizer (수렴 안정화)", min_value=0.0, max_value=5.0, value=0.1, step=0.1, disabled=auto_penal)
 
-            def basic_clean_cox(df_in, time_col):
-                out = df_in.copy()
-                out[time_col] = clean_time(out[time_col])
-                out = out[out[time_col] > 0]
-                out = out.replace([np.inf, -np.inf], np.nan)
-                return out
-
             if st.button("분석 실행 (Cox)"):
                 if not selected_event or not selected_censored:
                     st.error("사건값과 검열값을 각각 최소 1개 이상 선택하세요."); st.stop()
                 if set(selected_event) & set(selected_censored):
                     st.error("사건값과 검열값이 겹칩니다. 다시 선택하세요."); st.stop()
 
-                temp_df2 = basic_clean_cox(temp_df, time_col).dropna(subset=[time_col, "__event_for_cox"])
+                temp_df2 = clean_time(temp_df, time_col).dropna(subset=[time_col, "__event_for_cox"])
                 n_events = int(temp_df2["__event_for_cox"].sum())
                 st.info(f"총 관측치: {temp_df2.shape[0]}, 이벤트 수: {n_events}")
                 if n_events < 5:
@@ -779,15 +772,15 @@ if uploaded_file:
         # ------------------ TAB 4: PSM (Matched Table 1 Included) ------------------
         with tab4:
             st.header("⚖️ Propensity Score Matching")
-            c_psm1, c_psm2 = st.columns(2)
-            treat_col = c_psm1.selectbox("치료 변수 (0/1)", df.columns, key='psm_treat')
+            c1, c2 = st.columns(2)
+            treat_col = c1.selectbox("치료 변수 (0/1)", df.columns, key='psm_treat')
             
             is_binary = False
             if treat_col:
                 vals = df[treat_col].dropna().unique()
                 if len(vals) == 2:
                     is_binary = True
-                    treat_1 = c_psm2.selectbox(f"치료군(1) 값", vals, key='psm_val1')
+                    treat_1 = c2.selectbox(f"치료군(1) 값", vals, key='psm_val1')
                 else:
                     st.warning("치료 변수는 2개의 값이어야 합니다.")
 
@@ -821,9 +814,9 @@ if uploaded_file:
                                 st.pyplot(fig_love)
                                 
                                 out_psm = io.BytesIO()
-                                # [수정] xlsxwriter 사용
+                                # [수정] xlsxwriter 사용 + errors='ignore'
                                 with pd.ExcelWriter(out_psm, engine='xlsxwriter') as writer:
-                                    matched_df.drop(columns=['__T', 'logit_ps']).to_excel(writer, index=False)
+                                    matched_df.drop(columns=['__T', 'logit_ps'], errors='ignore').to_excel(writer, index=False)
                                 st.download_button("📥 매칭 데이터 저장", out_psm.getvalue(), "Matched.xlsx")
 
                                 # Matched Table 1
