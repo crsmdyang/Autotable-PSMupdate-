@@ -689,6 +689,7 @@ if uploaded_file:
                 st.dataframe(res_df, use_container_width=True)
 
                 output = io.BytesIO()
+                # [수정] xlsxwriter 사용
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     res_df.to_excel(writer, index=False)
                 st.download_button("📥 Cox 결과 저장", output.getvalue(), "Cox_Result.xlsx")
@@ -768,6 +769,7 @@ if uploaded_file:
                                 st.pyplot(fig_forest)
 
                                 out_l = io.BytesIO()
+                                # [수정] xlsxwriter 사용
                                 with pd.ExcelWriter(out_l, engine='xlsxwriter') as writer:
                                     res_df.to_excel(writer, sheet_name="Logistic")
                                 st.download_button("📥 로지스틱 저장", out_l.getvalue(), "Logistic.xlsx")
@@ -777,7 +779,7 @@ if uploaded_file:
         # ------------------ TAB 4: PSM (Matched Table 1 Included) ------------------
         with tab4:
             st.header("⚖️ Propensity Score Matching")
-            c1, c2 = st.columns(2)
+            c_psm1, c_psm2 = st.columns(2)
             treat_col = c_psm1.selectbox("치료 변수 (0/1)", df.columns, key='psm_treat')
             
             is_binary = False
@@ -819,6 +821,7 @@ if uploaded_file:
                                 st.pyplot(fig_love)
                                 
                                 out_psm = io.BytesIO()
+                                # [수정] xlsxwriter 사용
                                 with pd.ExcelWriter(out_psm, engine='xlsxwriter') as writer:
                                     matched_df.drop(columns=['__T', 'logit_ps']).to_excel(writer, index=False)
                                 st.download_button("📥 매칭 데이터 저장", out_psm.getvalue(), "Matched.xlsx")
@@ -844,6 +847,7 @@ if uploaded_file:
                                 else:
                                     st.dataframe(mt1, use_container_width=True)
                                     out_mt1 = io.BytesIO()
+                                    # [수정] xlsxwriter 사용
                                     with pd.ExcelWriter(out_mt1, engine='xlsxwriter') as writer:
                                         mt1.to_excel(writer, index=False)
                                     st.download_button("📥 Matched Table 1 저장", out_mt1.getvalue(), "Table1_Matched.xlsx")
