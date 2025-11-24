@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 import xlsxwriter
 from lifelines import CoxPHFitter
@@ -33,8 +34,14 @@ def render_tab2(df):
 
     if st.button("분석 실행 (Cox)"):
         if not sel_ev or not sel_cen: st.error("Event/Censored 선택 필수"); st.stop()
-        df2 = clean_time(temp_df, time_col).dropna(subset=[time_col, "__event_for_cox"])
-        st.info(f"N={len(df2)}, Events={int(df2['__event_for_cox'].sum())}")
+        
+        # [수정됨] clean_time 사용법 수정 및 양수 필터링 로직 명시
+        temp_df[time_col] = clean_time(temp_df[time_col]) # 1. 숫자 변환
+        df2 = temp_df[temp_df[time_col] > 0].copy()       # 2. 양수만 남기기
+        df2 = df2.dropna(subset=[time_col, "__event_for_cox"]) # 3. 결측치 제거
+        
+        n_events = int(df2["__event_for_cox"].sum())
+        st.info(f"N={len(df2)}, Events={n_events}")
 
         # Univariate
         uni_sum = {}; uni_na = []; cat_info = {}
