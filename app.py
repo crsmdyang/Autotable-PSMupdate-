@@ -106,21 +106,11 @@ def plot_forest(df_res, title="Forest Plot", effect_col="HR"):
 
 # ================== 2. Table 1 로직 ==================
 
-def suggest_variable_types(df, target_cols, threshold=20):
-    """초기 변수 타입 제안 (연속형 vs 범주형)"""
-    cont_vars = []
-    cat_vars = []
-    
-    for var in target_cols:
-        is_numeric = pd.api.types.is_numeric_dtype(df[var])
-        many_unique = df[var].nunique() > threshold
-        
-        if is_numeric and many_unique:
-            cont_vars.append(var)
-        else:
-            cat_vars.append(var)
-            
-    return cont_vars, cat_vars
+def suggest_variable_type_single(df, var, threshold=20):
+    """단일 변수 타입 제안"""
+    is_numeric = pd.api.types.is_numeric_dtype(df[var])
+    many_unique = df[var].nunique() > threshold
+    return "Continuous" if (is_numeric and many_unique) else "Categorical"
 
 def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars, user_cat_vars):
     result_rows = []
@@ -142,6 +132,7 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         if valid.empty: continue
 
         # --- 변수 타입 결정 (사용자 설정 우선) ---
+        # 사용자가 명시적으로 Continuous 리스트에 넣었거나, Editor에서 선택한 경우
         if var in user_cont_vars:
             is_continuous = True
         elif var in user_cat_vars:
@@ -151,20 +142,18 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
 
         # 1. 연속형 분석
         if is_continuous:
-            # [CRITICAL FIX] 연속형이면 강제로 숫자로 변환 시도 (문자열이 섞여있으면 NaN 처리)
-            # 이렇게 해야 사용자가 문자열 변수를 실수로 연속형에 넣었을 때 에러가 안 남
+            # [안전장치] 연속형이면 강제로 숫자로 변환 시도
             try:
                 valid_numeric = pd.to_numeric(valid[var], errors='coerce')
             except:
-                # 변환 실패 시 범주형으로 넘기거나 스킵해야 하지만, 여기선 NaN 처리된 상태로 진행
                 valid_numeric = valid[var]
 
-            # 그룹별 데이터 나누기 (숫자로 변환된 데이터 사용)
+            # 그룹별 데이터 나누기
             groups_data = [valid_numeric[valid[group_col] == g].dropna() for g in group_values]
             
-            # 데이터가 유효한지 체크 (모두 NaN이면 스킵)
+            # 유효성 체크
             if any(len(g) == 0 for g in groups_data):
-                continue # 계산 불가
+                continue 
 
             is_normal = True
             for g_dat in groups_data:
@@ -191,7 +180,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
             p = np.nan
             method = ""
             try:
-                # 통계 검정 (유효한 데이터만 사용)
                 valid_groups = [g for g in groups_data if len(g) > 0]
                 if len(valid_groups) < 2:
                     p = np.nan
@@ -221,7 +209,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
         # 2. 범주형 분석
         else:
             try:
-                # 범주형은 무조건 문자열로 취급
                 ct = pd.crosstab(valid[group_col], valid[var].astype(str))
                 method = "Chi-square"
                 p = np.nan
@@ -258,7 +245,6 @@ def analyze_table1_robust(df, group_col, value_map, target_cols, user_cont_vars,
             except Exception as e:
                 return None, {"type": "unknown", "var": var, "msg": str(e)}
 
-    # 최종 결과
     df_res = pd.DataFrame(result_rows)
     if not df_res.empty:
         cols_to_use = [c for c in final_col_order if c in df_res.columns]
@@ -381,59 +367,62 @@ if uploaded_file:
             with col1:
                 selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
             
+            # [NEW] 통합 변수 관리자 (Unified Variable Manager)
+            # Multiselect 대신 DataEditor를 사용하여 변수 선택 및 타입 설정을 동시에 관리
             all_cols = [c for c in df.columns if c != group_col]
-            with col2:
-                target_vars = st.multiselect("분석에 포함할 변수 선택", all_cols, default=all_cols)
+            
+            # 설정 상태 초기화 (처음 한 번만)
+            if 'var_config_df' not in st.session_state:
+                initial_data = []
+                for col in all_cols:
+                    initial_data.append({
+                        "Include": True, # 기본적으로 포함
+                        "Variable": col,
+                        "Type": suggest_variable_type_single(df, col)
+                    })
+                st.session_state['var_config_df'] = pd.DataFrame(initial_data)
+            
+            # 설정 UI 표시
+            st.write("---")
+            st.markdown("#### ⚙️ 분석 변수 및 타입 설정")
+            st.caption("💡 **Include 체크를 해제**하면 분석에서 제외되며, 화면이 흔들리지 않습니다.")
+            
+            edited_config = st.data_editor(
+                st.session_state['var_config_df'],
+                column_config={
+                    "Include": st.column_config.CheckboxColumn(
+                        "Include?",
+                        help="체크 해제 시 분석에서 제외됩니다.",
+                        width="small",
+                        default=True,
+                    ),
+                    "Variable": st.column_config.TextColumn(
+                        "Variable Name",
+                        width="medium",
+                        disabled=True, # 변수명은 수정 불가
+                    ),
+                    "Type": st.column_config.SelectboxColumn(
+                        "Data Type",
+                        help="데이터 타입을 변경할 수 있습니다.",
+                        width="medium",
+                        options=["Continuous", "Categorical"],
+                        required=True,
+                    )
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed", # 행 추가/삭제 방지 (중요!)
+                key='var_manager_editor'
+            )
+            
+            # 에디터 변경 사항 실시간 저장
+            st.session_state['var_config_df'] = edited_config
 
-            if target_vars:
-                # ----------------------------------------------------
-                # [핵심] 변수 타입 관리 (상호 배타적 선택 기능)
-                # ----------------------------------------------------
-                
-                # 1. 초기화 (Target Vars가 변경될 때마다 자동 재분류)
-                state_key = f"type_init_{hash(tuple(target_vars))}"
-                if 'current_target_hash' not in st.session_state or st.session_state.current_target_hash != state_key:
-                    auto_cont, auto_cat = suggest_variable_types(df, target_vars)
-                    st.session_state['user_cont'] = auto_cont
-                    st.session_state['user_cat'] = auto_cat
-                    st.session_state['current_target_hash'] = state_key
-
-                st.write("---")
-                st.markdown("#### ⚙️ 변수 타입 설정 (자동 연동)")
-                st.caption("✨ **꿀팁:** 아래 표에서 `Type`을 변경하면 즉시 반영됩니다! (드래그 앤 드롭 대체 기능)")
-
-                # [UI 옵션 1] 데이터 에디터 방식 (가장 추천 - 드래그 대체)
-                # 변수와 현재 타입을 DataFrame으로 변환
-                type_df = pd.DataFrame({
-                    'Variable': target_vars,
-                    'Type': ['Continuous' if v in st.session_state['user_cont'] else 'Categorical' for v in target_vars]
-                })
-                
-                edited_types = st.data_editor(
-                    type_df,
-                    column_config={
-                        "Type": st.column_config.SelectboxColumn(
-                            "Variable Type",
-                            help="연속형/범주형을 변경하세요",
-                            width="medium",
-                            options=["Continuous", "Categorical"],
-                            required=True,
-                        )
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key='type_editor'
-                )
-                
-                # 에디터 변경 사항 반영
-                new_cont_list = edited_types[edited_types['Type'] == 'Continuous']['Variable'].tolist()
-                new_cat_list = edited_types[edited_types['Type'] == 'Categorical']['Variable'].tolist()
-                
-                # 세션 업데이트
-                st.session_state['user_cont'] = new_cont_list
-                st.session_state['user_cat'] = new_cat_list
-                
-                # ----------------------------------------------------
+            # 선택된 변수 및 타입 추출
+            selected_rows = edited_config[edited_config['Include'] == True]
+            target_vars = selected_rows['Variable'].tolist()
+            user_cont_vars = selected_rows[selected_rows['Type'] == 'Continuous']['Variable'].tolist()
+            user_cat_vars = selected_rows[selected_rows['Type'] == 'Categorical']['Variable'].tolist()
 
             value_map = {v: str(v) for v in selected_vals}
             
@@ -442,8 +431,7 @@ if uploaded_file:
                     with st.spinner("분석 중... (정규성 검정 포함)"):
                         t1_res, error_info = analyze_table1_robust(
                             df, group_col, value_map, target_vars, 
-                            st.session_state['user_cont'], 
-                            st.session_state['user_cat']
+                            user_cont_vars, user_cat_vars
                         )
                         
                         if error_info:
