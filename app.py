@@ -320,352 +320,393 @@ def run_psm(df, treatment_col, covariates, caliper=0.2):
 
 st.title("Dr.Stats Ultimate: Medical Statistics Tool")
 
+# [NEW] 파일 업로더 및 시트 선택 로직
 uploaded_file = st.file_uploader("📂 데이터 파일 업로드 (Excel/CSV)", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
-    if 'df' not in st.session_state:
-        if uploaded_file.name.endswith('.csv'):
-            df_load = pd.read_csv(uploaded_file)
-        else:
-            df_load = pd.read_excel(uploaded_file)
-        df_load.columns = df_load.columns.astype(str).str.strip()
-        st.session_state['df'] = df_load
+    # 파일 및 시트 처리
+    selected_sheet = None
     
-    # 데이터 에디터 (수정 기능)
-    with st.expander("✏️ 원본 데이터 미리보기 및 수정", expanded=False):
-        st.info("데이터 오류(문자/숫자 혼합)가 있으면 여기서 직접 수정하세요. 수정 시 즉시 반영됩니다.")
-        edited_df = st.data_editor(st.session_state['df'], num_rows="dynamic", use_container_width=True, key='main_editor')
-        if not edited_df.equals(st.session_state['df']):
-            st.session_state['df'] = edited_df
-            st.rerun()
-
-    df = st.session_state['df']
-    st.divider()
-
-    # 탭 구성 (KM Curve 삭제됨)
-    tab1, tab2, tab3, tab4, tab_methods = st.tabs([
-        "📊 Table 1 (기초통계)", 
-        "⏱️ Cox Regression", 
-        "💊 Logistic Regression",
-        "⚖️ PSM (매칭)",
-        "📝 Methods 작문"
-    ])
-
-    # ------------------ TAB 1: Baseline Characteristics ------------------
-    with tab1:
-        st.subheader("Table 1: 인구통계학적 특성 비교")
-        group_col = st.selectbox("그룹 변수 선택", df.columns, key='t1_group')
-        
-        if group_col:
-            unique_vals = df[group_col].dropna().unique()
-            col1, col2 = st.columns(2)
-            with col1:
-                selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
-            
-            # 통합 변수 관리자
-            all_cols = [c for c in df.columns if c != group_col]
-            
-            # 설정 상태 초기화
-            if 'var_config_df' not in st.session_state:
-                initial_data = []
-                for col in all_cols:
-                    initial_data.append({
-                        "Include": True,
-                        "Variable": col,
-                        "Type": suggest_variable_type_single(df, col)
-                    })
-                st.session_state['var_config_df'] = pd.DataFrame(initial_data)
-            
-            # UI 표시
-            st.write("---")
-            st.markdown("#### ⚙️ 분석 변수 및 타입 설정")
-            st.caption("💡 **Include 체크를 해제**하면 분석에서 제외되며, 화면이 흔들리지 않습니다.")
-            
-            # 전체 선택/해제 버튼
-            col_btn1, col_btn2, _ = st.columns([0.15, 0.15, 0.7])
-            if col_btn1.button("✅ 전체 선택", key='btn_select_all'):
-                st.session_state['var_config_df']['Include'] = True
-                st.rerun()
-            
-            if col_btn2.button("⬜ 전체 해제", key='btn_deselect_all'):
-                st.session_state['var_config_df']['Include'] = False
-                st.rerun()
-
-            edited_config = st.data_editor(
-                st.session_state['var_config_df'],
-                column_config={
-                    "Include": st.column_config.CheckboxColumn(
-                        "Include?",
-                        help="체크 해제 시 분석에서 제외됩니다.",
-                        width="small",
-                        default=True,
-                    ),
-                    "Variable": st.column_config.TextColumn(
-                        "Variable Name",
-                        width="medium",
-                        disabled=True,
-                    ),
-                    "Type": st.column_config.SelectboxColumn(
-                        "Data Type",
-                        help="데이터 타입을 변경할 수 있습니다.",
-                        width="medium",
-                        options=["Continuous", "Categorical"],
-                        required=True,
-                    )
-                },
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed", 
-                key='var_manager_editor'
-            )
-            
-            # 에디터 변경 사항 저장
-            st.session_state['var_config_df'] = edited_config
-
-            # 선택된 변수 추출
-            selected_rows = edited_config[edited_config['Include'] == True]
-            target_vars = selected_rows['Variable'].tolist()
-            user_cont_vars = selected_rows[selected_rows['Type'] == 'Continuous']['Variable'].tolist()
-            user_cat_vars = selected_rows[selected_rows['Type'] == 'Categorical']['Variable'].tolist()
-
-            value_map = {v: str(v) for v in selected_vals}
-            
-            if len(selected_vals) >= 2 and target_vars:
-                if st.button("Table 1 생성", key='btn_t1'):
-                    with st.spinner("분석 중... (정규성 검정 포함)"):
-                        t1_res, error_info = analyze_table1_robust(
-                            df, group_col, value_map, target_vars, 
-                            user_cont_vars, user_cat_vars
-                        )
-                        
-                        if error_info:
-                            st.error(f"🚨 **데이터 오류: '{error_info['var']}'**")
-                            st.warning(f"맨 위 '데이터 수정' 탭에서 값을 통일해주세요. 오류: {error_info['msg']}")
-                        else:
-                            st.dataframe(t1_res, use_container_width=True)
-                            output = io.BytesIO()
-                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                t1_res.to_excel(writer, index=False)
-                            st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
-
-    # ------------------ TAB 2: Cox Regression ------------------
-    with tab2:
-        st.subheader("Cox Proportional Hazards Model")
-        c1, c2 = st.columns(2)
-        time_col = c1.selectbox("Time", df.columns, key='cox_time')
-        event_col = c2.selectbox("Event", df.columns, key='cox_event')
-        
-        if event_col:
-            events = st.multiselect("Event(1) 값", df[event_col].dropna().unique(), key='cox_ev_val')
-            censored = st.multiselect("Censored(0) 값", df[event_col].dropna().unique(), key='cox_cen_val')
-            
-            if events and censored:
-                df_cox = df.copy()
-                df_cox['T'] = pd.to_numeric(df_cox[time_col], errors='coerce')
-                df_cox['E'] = ensure_binary_event(df_cox[event_col], set(events), set(censored))
-                df_cox = df_cox.dropna(subset=['T', 'E'])
-                df_cox = df_cox[df_cox['T'] > 0] 
-
-                predictors = st.multiselect("분석 변수", [c for c in df.columns if c not in [time_col, event_col]])
-                col_opt1, col_opt2 = st.columns(2)
-                p_threshold = col_opt1.number_input("Stepwise P-value", 0.05, key='cox_p')
-                forced_vars = col_opt2.multiselect("강제 포함 변수", predictors, key='cox_force')
-                
-                if st.button("Cox 분석 실행", key='btn_cox'):
-                    st.info(f"N={len(df_cox)}, Event={int(df_cox['E'].sum())}")
-                    uni_res = {}
-                    significant_vars = []
-                    
-                    for var in predictors:
-                        try:
-                            if df_cox[var].nunique() < 2: continue 
-                            if df_cox[var].dtype == 'object' or df_cox[var].nunique() < 10:
-                                lvls = ordered_levels(df_cox[var])
-                                if len(lvls) < 2: continue
-                                dmy = make_dummies(df_cox, var, lvls)
-                                data = pd.concat([df_cox[['T', 'E']], dmy], axis=1).dropna()
-                            else:
-                                data = df_cox[['T', 'E', var]].copy()
-                                data[var] = pd.to_numeric(data[var], errors='coerce')
-                                data = data.dropna()
-                            cph = CoxPHFitter()
-                            cph.fit(data, duration_col='T', event_col='E')
-                            if min(cph.summary['p'].values) < p_threshold:
-                                significant_vars.append(var)
-                        except: pass
-                    
-                    final_vars = list(set(significant_vars) | set(forced_vars))
-                    
-                    if not final_vars:
-                        st.warning("다변량 분석에 포함될 변수가 없습니다.")
-                    else:
-                        st.write("---")
-                        st.markdown(f"**다변량 분석 변수:** {', '.join(final_vars)}")
-                        X_multi_list = []
-                        for var in final_vars:
-                            if df_cox[var].dtype == 'object' or df_cox[var].nunique() < 10:
-                                lvls = ordered_levels(df_cox[var])
-                                X_multi_list.append(make_dummies(df_cox[[var]], var, lvls))
-                            else:
-                                X_multi_list.append(pd.to_numeric(df_cox[var], errors='coerce'))
-                        
-                        X_multi = pd.concat(X_multi_list, axis=1)
-                        vif_df = check_vif(X_multi)
-                        st.caption("1. VIF Check")
-                        st.dataframe(vif_df.T)
-
-                        data_multi = pd.concat([df_cox[['T', 'E']], X_multi], axis=1).dropna()
-                        try:
-                            cph_multi = CoxPHFitter()
-                            cph_multi.fit(data_multi, duration_col='T', event_col='E')
-                            
-                            res_summary = cph_multi.summary[['exp(coef)', 'exp(coef) lower 95%', 'exp(coef) upper 95%', 'p']]
-                            st.subheader("2. Multivariate Result")
-                            st.dataframe(res_summary)
-                            
-                            st.subheader("🌲 Forest Plot (Hazard Ratio)")
-                            fig_forest = plot_forest(res_summary, title="Forest Plot - Cox Regression", effect_col="exp(coef)")
-                            st.pyplot(fig_forest)
-                            
-                            st.subheader("3. PH Assumption Test")
-                            ph_test = proportional_hazard_test(cph_multi, data_multi)
-                            st.dataframe(ph_test.summary)
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-
-    # ------------------ TAB 3: Logistic Regression ------------------
-    with tab3:
-        st.subheader("Binary Logistic Regression")
-        dep_var = st.selectbox("Y (종속변수)", df.columns, key='log_y')
-        if dep_var:
-            ev_vals = st.multiselect("Event(1)", df[dep_var].unique(), key='log_ev')
-            ct_vals = st.multiselect("Control(0)", df[dep_var].unique(), key='log_ct')
-            
-            if ev_vals and ct_vals:
-                df_log = df.copy()
-                df_log['Y'] = ensure_binary_event(df_log[dep_var], set(ev_vals), set(ct_vals))
-                df_log = df_log.dropna(subset=['Y'])
-                
-                indep_vars = st.multiselect("X (독립변수)", [c for c in df.columns if c != dep_var], key='log_x')
-                col_l1, col_l2 = st.columns(2)
-                p_enter_log = col_l1.number_input("Stepwise P", 0.05, key='log_p')
-                forced_log = col_l2.multiselect("강제 포함", indep_vars, key='log_forced')
-                
-                if st.button("Logistic 분석 실행", key='btn_log'):
-                    sig_vars_log = []
-                    for var in indep_vars:
-                        try:
-                            temp_df = df_log[['Y', var]].dropna()
-                            if temp_df.empty: continue
-                            if temp_df[var].dtype == 'object' or temp_df[var].nunique() < 10:
-                                lvls = ordered_levels(temp_df[var])
-                                if len(lvls) < 2: continue
-                                X = make_dummies(temp_df, var, lvls)
-                            else:
-                                X = pd.to_numeric(temp_df[var], errors='coerce').to_frame()
-                            X = sm.add_constant(X)
-                            model = sm.Logit(temp_df['Y'], X).fit(disp=0)
-                            p_vals = [model.pvalues[c] for c in model.pvalues.index if c != 'const']
-                            if p_vals and min(p_vals) < p_enter_log:
-                                sig_vars_log.append(var)
-                        except: pass
-                    
-                    final_log_vars = list(set(sig_vars_log) | set(forced_log))
-                    
-                    if not final_log_vars:
-                        st.warning("조건을 만족하는 변수가 없습니다.")
-                    else:
-                        st.markdown(f"**다변량 모델:** {', '.join(final_log_vars)}")
-                        X_list = []
-                        for var in final_log_vars:
-                            if df_log[var].dtype == 'object' or df_log[var].nunique() < 10:
-                                lvls = ordered_levels(df_log[var])
-                                X_list.append(make_dummies(df_log[[var]], var, lvls))
-                            else:
-                                X_list.append(pd.to_numeric(df_log[var], errors='coerce'))
-                        
-                        X_multi = pd.concat(X_list, axis=1)
-                        st.caption("VIF Check")
-                        st.dataframe(check_vif(X_multi).T)
-                        
-                        X_multi = sm.add_constant(X_multi)
-                        data_model = pd.concat([df_log['Y'], X_multi], axis=1).dropna()
-                        try:
-                            logit_model = sm.Logit(data_model['Y'], data_model.drop(columns=['Y'])).fit(disp=0)
-                            
-                            st.subheader("2. Multivariate Result (OR)")
-                            params = logit_model.params
-                            conf = logit_model.conf_int()
-                            conf['OR'] = params.apply(np.exp)
-                            conf['Lower'] = conf[0].apply(np.exp)
-                            conf['Upper'] = conf[1].apply(np.exp)
-                            conf['p'] = logit_model.pvalues
-                            
-                            res_df = conf[['OR', 'Lower', 'Upper', 'p']]
-                            res_df = res_df.drop('const', errors='ignore')
-                            st.dataframe(res_df.style.format("{:.3f}"))
-                            st.subheader("🌲 Forest Plot (Odds Ratio)")
-                            fig_forest = plot_forest(res_df, title="Forest Plot - Logistic Regression", effect_col="OR")
-                            st.pyplot(fig_forest)
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-
-    # ------------------ TAB 4: PSM ------------------
-    with tab4:
-        st.header("⚖️ PSM (Propensity Score Matching)")
-        c_psm1, c_psm2 = st.columns(2)
-        treat_col = c_psm1.selectbox("치료 변수 (Treatment, 0/1)", df.columns, key='psm_treat')
-        
-        is_binary = False
-        if treat_col:
-            vals = df[treat_col].dropna().unique()
-            if len(vals) == 2:
-                is_binary = True
-                treat_1 = c_psm2.selectbox(f"치료군(1) 값", vals, key='psm_val1')
+    # 1. 엑셀 파일인 경우 시트 선택 기능 표시
+    if uploaded_file.name.endswith(('.xlsx', '.xls')):
+        try:
+            xl = pd.ExcelFile(uploaded_file)
+            sheet_names = xl.sheet_names
+            if len(sheet_names) > 1:
+                selected_sheet = st.selectbox("📑 시트 선택 (Select Sheet)", sheet_names)
             else:
-                st.warning("치료 변수는 2개의 값이어야 합니다.")
-
-        if is_binary:
-            covariates = st.multiselect("매칭 공변량", [c for c in df.columns if c != treat_col], key='psm_cov')
-            caliper = st.slider("Caliper", 0.0, 1.0, 0.2, 0.05)
+                selected_sheet = sheet_names[0]
+        except Exception as e:
+            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+            st.stop()
+    
+    # 2. 고유 ID 생성 (파일명 + 시트명 + 파일크기)
+    # 이를 통해 파일이 바뀌거나 시트가 바뀌면 새로운 데이터로 인식하게 함
+    file_id = f"{uploaded_file.name}_{selected_sheet if selected_sheet else 'csv'}_{uploaded_file.size}"
+    
+    # 3. 데이터 로드 및 세션 업데이트 (ID가 다를 때만 실행)
+    if 'current_file_id' not in st.session_state or st.session_state['current_file_id'] != file_id:
+        try:
+            if selected_sheet:
+                df_load = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+            else:
+                df_load = pd.read_csv(uploaded_file)
             
-            if st.button("PSM 실행", key='btn_psm'):
-                if not covariates:
-                    st.error("공변량을 선택하세요.")
-                else:
-                    with st.spinner("매칭 중..."):
-                        df_psm = df.copy()
-                        df_psm['__T'] = np.where(df_psm[treat_col] == treat_1, 1, 0)
-                        matched_df, original_w_score = run_psm(df_psm, '__T', covariates, caliper)
-                        
-                        if matched_df is None:
-                            st.error("매칭 실패: 조건을 완화하세요.")
-                        else:
-                            st.success(f"매칭 완료! (N={len(matched_df)})")
-                            
-                            smd_before = calculate_smd(original_w_score, '__T', covariates)
-                            smd_after = calculate_smd(matched_df, '__T', covariates)
-                            smd_merge = pd.merge(smd_before, smd_after, on='Variable', suffixes=('_Before', '_After'))
-                            smd_merge['Balanced'] = np.where(smd_merge['SMD_After'] < 0.1, "✅ Good", "⚠️ Unbalanced")
-                            
-                            st.dataframe(smd_merge.style.format({'SMD_Before': '{:.3f}', 'SMD_After': '{:.3f}'}))
-                            
-                            fig_love, ax_love = plt.subplots(figsize=(8, len(covariates)*0.5 + 2))
-                            sns.scatterplot(data=smd_merge, x='SMD_Before', y='Variable', label='Before', color='red', s=100)
-                            sns.scatterplot(data=smd_merge, x='SMD_After', y='Variable', label='After', color='blue', s=100)
-                            plt.axvline(0.1, color='gray', linestyle='--')
-                            st.pyplot(fig_love)
-                            
-                            out_psm = io.BytesIO()
-                            with pd.ExcelWriter(out_psm, engine='openpyxl') as writer:
-                                matched_df.drop(columns=['__T', 'logit_ps']).to_excel(writer, index=False, sheet_name='Matched_Data')
-                            st.download_button("📥 매칭 데이터 다운로드", out_psm.getvalue(), "PSM_Matched_Data.xlsx")
+            # 컬럼 공백 제거
+            df_load.columns = df_load.columns.astype(str).str.strip()
+            
+            st.session_state['df'] = df_load
+            st.session_state['current_file_id'] = file_id
+            
+            # 파일이 바뀌었으므로 기존 변수 설정(체크박스 등) 초기화
+            if 'var_config_df' in st.session_state:
+                del st.session_state['var_config_df']
+            if 'current_target_hash' in st.session_state:
+                del st.session_state['current_target_hash']
+                
+            st.rerun() # 새로고침하여 반영
+        except Exception as e:
+            st.error(f"데이터 로드 실패: {e}")
+            st.stop()
 
-    # ------------------ TAB Methods ------------------
-    with tab_methods:
-        st.header("📝 Methods Section Generator")
-        st.info("논문의 'Statistical Analysis' 섹션에 사용할 수 있는 초안입니다.")
-        methods_text = """
+    # 현재 데이터 사용
+    df = st.session_state.get('df')
+
+    if df is not None:
+        # 데이터 에디터 (수정 기능)
+        with st.expander("✏️ 원본 데이터 미리보기 및 수정", expanded=False):
+            st.info("데이터 오류(문자/숫자 혼합)가 있으면 여기서 직접 수정하세요. 수정 시 즉시 반영됩니다.")
+            edited_df = st.data_editor(st.session_state['df'], num_rows="dynamic", use_container_width=True, key='main_editor')
+            if not edited_df.equals(st.session_state['df']):
+                st.session_state['df'] = edited_df
+                st.rerun()
+
+        st.divider()
+
+        # 탭 구성
+        tab1, tab2, tab3, tab4, tab_methods = st.tabs([
+            "📊 Table 1 (기초통계)", 
+            "⏱️ Cox Regression", 
+            "💊 Logistic Regression",
+            "⚖️ PSM (매칭)",
+            "📝 Methods 작문"
+        ])
+
+        # ------------------ TAB 1: Baseline Characteristics ------------------
+        with tab1:
+            st.subheader("Table 1: 인구통계학적 특성 비교")
+            group_col = st.selectbox("그룹 변수 선택", df.columns, key='t1_group')
+            
+            if group_col:
+                unique_vals = df[group_col].dropna().unique()
+                col1, col2 = st.columns(2)
+                with col1:
+                    selected_vals = st.multiselect("비교할 그룹 값 (2개 이상)", unique_vals, default=unique_vals[:2] if len(unique_vals)>=2 else unique_vals)
+                
+                # 통합 변수 관리자
+                all_cols = [c for c in df.columns if c != group_col]
+                
+                # 설정 상태 초기화
+                if 'var_config_df' not in st.session_state:
+                    initial_data = []
+                    for col in all_cols:
+                        initial_data.append({
+                            "Include": True,
+                            "Variable": col,
+                            "Type": suggest_variable_type_single(df, col)
+                        })
+                    st.session_state['var_config_df'] = pd.DataFrame(initial_data)
+                
+                # UI 표시
+                st.write("---")
+                st.markdown("#### ⚙️ 분석 변수 및 타입 설정")
+                st.caption("💡 **Include 체크를 해제**하면 분석에서 제외되며, 화면이 흔들리지 않습니다.")
+                
+                # 전체 선택/해제 버튼
+                col_btn1, col_btn2, _ = st.columns([0.15, 0.15, 0.7])
+                if col_btn1.button("✅ 전체 선택", key='btn_select_all'):
+                    st.session_state['var_config_df']['Include'] = True
+                    st.rerun()
+                
+                if col_btn2.button("⬜ 전체 해제", key='btn_deselect_all'):
+                    st.session_state['var_config_df']['Include'] = False
+                    st.rerun()
+
+                edited_config = st.data_editor(
+                    st.session_state['var_config_df'],
+                    column_config={
+                        "Include": st.column_config.CheckboxColumn(
+                            "Include?",
+                            help="체크 해제 시 분석에서 제외됩니다.",
+                            width="small",
+                            default=True,
+                        ),
+                        "Variable": st.column_config.TextColumn(
+                            "Variable Name",
+                            width="medium",
+                            disabled=True,
+                        ),
+                        "Type": st.column_config.SelectboxColumn(
+                            "Data Type",
+                            help="데이터 타입을 변경할 수 있습니다.",
+                            width="medium",
+                            options=["Continuous", "Categorical"],
+                            required=True,
+                        )
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    num_rows="fixed", 
+                    key='var_manager_editor'
+                )
+                
+                # 에디터 변경 사항 저장
+                st.session_state['var_config_df'] = edited_config
+
+                # 선택된 변수 추출
+                selected_rows = edited_config[edited_config['Include'] == True]
+                target_vars = selected_rows['Variable'].tolist()
+                user_cont_vars = selected_rows[selected_rows['Type'] == 'Continuous']['Variable'].tolist()
+                user_cat_vars = selected_rows[selected_rows['Type'] == 'Categorical']['Variable'].tolist()
+
+                value_map = {v: str(v) for v in selected_vals}
+                
+                if len(selected_vals) >= 2 and target_vars:
+                    if st.button("Table 1 생성", key='btn_t1'):
+                        with st.spinner("분석 중... (정규성 검정 포함)"):
+                            t1_res, error_info = analyze_table1_robust(
+                                df, group_col, value_map, target_vars, 
+                                user_cont_vars, user_cat_vars
+                            )
+                            
+                            if error_info:
+                                st.error(f"🚨 **데이터 오류: '{error_info['var']}'**")
+                                st.warning(f"맨 위 '데이터 수정' 탭에서 값을 통일해주세요. 오류: {error_info['msg']}")
+                            else:
+                                st.dataframe(t1_res, use_container_width=True)
+                                output = io.BytesIO()
+                                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                    t1_res.to_excel(writer, index=False)
+                                st.download_button("📥 엑셀 다운로드", output.getvalue(), "Table1_Robust.xlsx")
+
+        # ------------------ TAB 2: Cox Regression ------------------
+        with tab2:
+            st.subheader("Cox Proportional Hazards Model")
+            c1, c2 = st.columns(2)
+            time_col = c1.selectbox("Time", df.columns, key='cox_time')
+            event_col = c2.selectbox("Event", df.columns, key='cox_event')
+            
+            if event_col:
+                events = st.multiselect("Event(1) 값", df[event_col].dropna().unique(), key='cox_ev_val')
+                censored = st.multiselect("Censored(0) 값", df[event_col].dropna().unique(), key='cox_cen_val')
+                
+                if events and censored:
+                    df_cox = df.copy()
+                    df_cox['T'] = pd.to_numeric(df_cox[time_col], errors='coerce')
+                    df_cox['E'] = ensure_binary_event(df_cox[event_col], set(events), set(censored))
+                    df_cox = df_cox.dropna(subset=['T', 'E'])
+                    df_cox = df_cox[df_cox['T'] > 0] 
+
+                    predictors = st.multiselect("분석 변수", [c for c in df.columns if c not in [time_col, event_col]])
+                    col_opt1, col_opt2 = st.columns(2)
+                    p_threshold = col_opt1.number_input("Stepwise P-value", 0.05, key='cox_p')
+                    forced_vars = col_opt2.multiselect("강제 포함 변수", predictors, key='cox_force')
+                    
+                    if st.button("Cox 분석 실행", key='btn_cox'):
+                        st.info(f"N={len(df_cox)}, Event={int(df_cox['E'].sum())}")
+                        uni_res = {}
+                        significant_vars = []
+                        
+                        for var in predictors:
+                            try:
+                                if df_cox[var].nunique() < 2: continue 
+                                if df_cox[var].dtype == 'object' or df_cox[var].nunique() < 10:
+                                    lvls = ordered_levels(df_cox[var])
+                                    if len(lvls) < 2: continue
+                                    dmy = make_dummies(df_cox, var, lvls)
+                                    data = pd.concat([df_cox[['T', 'E']], dmy], axis=1).dropna()
+                                else:
+                                    data = df_cox[['T', 'E', var]].copy()
+                                    data[var] = pd.to_numeric(data[var], errors='coerce')
+                                    data = data.dropna()
+                                cph = CoxPHFitter()
+                                cph.fit(data, duration_col='T', event_col='E')
+                                if min(cph.summary['p'].values) < p_threshold:
+                                    significant_vars.append(var)
+                            except: pass
+                        
+                        final_vars = list(set(significant_vars) | set(forced_vars))
+                        
+                        if not final_vars:
+                            st.warning("다변량 분석에 포함될 변수가 없습니다.")
+                        else:
+                            st.write("---")
+                            st.markdown(f"**다변량 분석 변수:** {', '.join(final_vars)}")
+                            X_multi_list = []
+                            for var in final_vars:
+                                if df_cox[var].dtype == 'object' or df_cox[var].nunique() < 10:
+                                    lvls = ordered_levels(df_cox[var])
+                                    X_multi_list.append(make_dummies(df_cox[[var]], var, lvls))
+                                else:
+                                    X_multi_list.append(pd.to_numeric(df_cox[var], errors='coerce'))
+                            
+                            X_multi = pd.concat(X_multi_list, axis=1)
+                            vif_df = check_vif(X_multi)
+                            st.caption("1. VIF Check")
+                            st.dataframe(vif_df.T)
+
+                            data_multi = pd.concat([df_cox[['T', 'E']], X_multi], axis=1).dropna()
+                            try:
+                                cph_multi = CoxPHFitter()
+                                cph_multi.fit(data_multi, duration_col='T', event_col='E')
+                                
+                                res_summary = cph_multi.summary[['exp(coef)', 'exp(coef) lower 95%', 'exp(coef) upper 95%', 'p']]
+                                st.subheader("2. Multivariate Result")
+                                st.dataframe(res_summary)
+                                
+                                st.subheader("🌲 Forest Plot (Hazard Ratio)")
+                                fig_forest = plot_forest(res_summary, title="Forest Plot - Cox Regression", effect_col="exp(coef)")
+                                st.pyplot(fig_forest)
+                                
+                                st.subheader("3. PH Assumption Test")
+                                ph_test = proportional_hazard_test(cph_multi, data_multi)
+                                st.dataframe(ph_test.summary)
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+        # ------------------ TAB 3: Logistic Regression ------------------
+        with tab3:
+            st.subheader("Binary Logistic Regression")
+            dep_var = st.selectbox("Y (종속변수)", df.columns, key='log_y')
+            if dep_var:
+                ev_vals = st.multiselect("Event(1)", df[dep_var].unique(), key='log_ev')
+                ct_vals = st.multiselect("Control(0)", df[dep_var].unique(), key='log_ct')
+                
+                if ev_vals and ct_vals:
+                    df_log = df.copy()
+                    df_log['Y'] = ensure_binary_event(df_log[dep_var], set(ev_vals), set(ct_vals))
+                    df_log = df_log.dropna(subset=['Y'])
+                    
+                    indep_vars = st.multiselect("X (독립변수)", [c for c in df.columns if c != dep_var], key='log_x')
+                    col_l1, col_l2 = st.columns(2)
+                    p_enter_log = col_l1.number_input("Stepwise P", 0.05, key='log_p')
+                    forced_log = col_l2.multiselect("강제 포함", indep_vars, key='log_forced')
+                    
+                    if st.button("Logistic 분석 실행", key='btn_log'):
+                        sig_vars_log = []
+                        for var in indep_vars:
+                            try:
+                                temp_df = df_log[['Y', var]].dropna()
+                                if temp_df.empty: continue
+                                if temp_df[var].dtype == 'object' or temp_df[var].nunique() < 10:
+                                    lvls = ordered_levels(temp_df[var])
+                                    if len(lvls) < 2: continue
+                                    X = make_dummies(temp_df, var, lvls)
+                                else:
+                                    X = pd.to_numeric(temp_df[var], errors='coerce').to_frame()
+                                X = sm.add_constant(X)
+                                model = sm.Logit(temp_df['Y'], X).fit(disp=0)
+                                p_vals = [model.pvalues[c] for c in model.pvalues.index if c != 'const']
+                                if p_vals and min(p_vals) < p_enter_log:
+                                    sig_vars_log.append(var)
+                            except: pass
+                        
+                        final_log_vars = list(set(sig_vars_log) | set(forced_log))
+                        
+                        if not final_log_vars:
+                            st.warning("조건을 만족하는 변수가 없습니다.")
+                        else:
+                            st.markdown(f"**다변량 모델:** {', '.join(final_log_vars)}")
+                            X_list = []
+                            for var in final_log_vars:
+                                if df_log[var].dtype == 'object' or df_log[var].nunique() < 10:
+                                    lvls = ordered_levels(df_log[var])
+                                    X_list.append(make_dummies(df_log[[var]], var, lvls))
+                                else:
+                                    X_list.append(pd.to_numeric(df_log[var], errors='coerce'))
+                            
+                            X_multi = pd.concat(X_list, axis=1)
+                            st.caption("VIF Check")
+                            st.dataframe(check_vif(X_multi).T)
+                            
+                            X_multi = sm.add_constant(X_multi)
+                            data_model = pd.concat([df_log['Y'], X_multi], axis=1).dropna()
+                            try:
+                                logit_model = sm.Logit(data_model['Y'], data_model.drop(columns=['Y'])).fit(disp=0)
+                                
+                                st.subheader("2. Multivariate Result (OR)")
+                                params = logit_model.params
+                                conf = logit_model.conf_int()
+                                conf['OR'] = params.apply(np.exp)
+                                conf['Lower'] = conf[0].apply(np.exp)
+                                conf['Upper'] = conf[1].apply(np.exp)
+                                conf['p'] = logit_model.pvalues
+                                
+                                res_df = conf[['OR', 'Lower', 'Upper', 'p']]
+                                res_df = res_df.drop('const', errors='ignore')
+                                st.dataframe(res_df.style.format("{:.3f}"))
+                                st.subheader("🌲 Forest Plot (Odds Ratio)")
+                                fig_forest = plot_forest(res_df, title="Forest Plot - Logistic Regression", effect_col="OR")
+                                st.pyplot(fig_forest)
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+        # ------------------ TAB 4: PSM ------------------
+        with tab4:
+            st.header("⚖️ PSM (Propensity Score Matching)")
+            c_psm1, c_psm2 = st.columns(2)
+            treat_col = c_psm1.selectbox("치료 변수 (Treatment, 0/1)", df.columns, key='psm_treat')
+            
+            is_binary = False
+            if treat_col:
+                vals = df[treat_col].dropna().unique()
+                if len(vals) == 2:
+                    is_binary = True
+                    treat_1 = c_psm2.selectbox(f"치료군(1) 값", vals, key='psm_val1')
+                else:
+                    st.warning("치료 변수는 2개의 값이어야 합니다.")
+
+            if is_binary:
+                covariates = st.multiselect("매칭 공변량", [c for c in df.columns if c != treat_col], key='psm_cov')
+                caliper = st.slider("Caliper", 0.0, 1.0, 0.2, 0.05)
+                
+                if st.button("PSM 실행", key='btn_psm'):
+                    if not covariates:
+                        st.error("공변량을 선택하세요.")
+                    else:
+                        with st.spinner("매칭 중..."):
+                            df_psm = df.copy()
+                            df_psm['__T'] = np.where(df_psm[treat_col] == treat_1, 1, 0)
+                            matched_df, original_w_score = run_psm(df_psm, '__T', covariates, caliper)
+                            
+                            if matched_df is None:
+                                st.error("매칭 실패: 조건을 완화하세요.")
+                            else:
+                                st.success(f"매칭 완료! (N={len(matched_df)})")
+                                
+                                smd_before = calculate_smd(original_w_score, '__T', covariates)
+                                smd_after = calculate_smd(matched_df, '__T', covariates)
+                                smd_merge = pd.merge(smd_before, smd_after, on='Variable', suffixes=('_Before', '_After'))
+                                smd_merge['Balanced'] = np.where(smd_merge['SMD_After'] < 0.1, "✅ Good", "⚠️ Unbalanced")
+                                
+                                st.dataframe(smd_merge.style.format({'SMD_Before': '{:.3f}', 'SMD_After': '{:.3f}'}))
+                                
+                                fig_love, ax_love = plt.subplots(figsize=(8, len(covariates)*0.5 + 2))
+                                sns.scatterplot(data=smd_merge, x='SMD_Before', y='Variable', label='Before', color='red', s=100)
+                                sns.scatterplot(data=smd_merge, x='SMD_After', y='Variable', label='After', color='blue', s=100)
+                                plt.axvline(0.1, color='gray', linestyle='--')
+                                st.pyplot(fig_love)
+                                
+                                out_psm = io.BytesIO()
+                                with pd.ExcelWriter(out_psm, engine='openpyxl') as writer:
+                                    matched_df.drop(columns=['__T', 'logit_ps']).to_excel(writer, index=False, sheet_name='Matched_Data')
+                                st.download_button("📥 매칭 데이터 다운로드", out_psm.getvalue(), "PSM_Matched_Data.xlsx")
+
+        # ------------------ TAB Methods ------------------
+        with tab_methods:
+            st.header("📝 Methods Section Generator")
+            st.info("논문의 'Statistical Analysis' 섹션에 사용할 수 있는 초안입니다.")
+            methods_text = """
 **Statistical Analysis**
 
 Continuous variables were compared using the Student's t-test or the Mann-Whitney U test, as appropriate, and categorical variables were compared using the Chi-square test or Fisher's exact test. Normality of the data distribution was assessed using the Shapiro-Wilk test. Data are presented as mean ± standard deviation for normally distributed continuous variables, median [interquartile range] for non-normally distributed variables, and number (percentage) for categorical variables.
@@ -675,8 +716,8 @@ Survival analysis was performed using the Kaplan-Meier method, and differences b
 To reduce selection bias, we performed Propensity Score Matching (PSM). Propensity scores were estimated using a logistic regression model based on baseline covariates. A 1:1 nearest neighbor matching algorithm with a caliper width of 0.2 standard deviations of the logit of the propensity score was used. The balance of covariates between groups was assessed using the Standardized Mean Difference (SMD), with an SMD < 0.1 indicating negligible imbalance.
 
 All statistical analyses were performed using Python (version 3.x) with pandas, scipy, statsmodels, and lifelines libraries. A p-value < 0.05 was considered statistically significant.
-        """
-        st.text_area("Copy & Paste this to your manuscript:", methods_text, height=400)
+            """
+            st.text_area("Copy & Paste this to your manuscript:", methods_text, height=400)
 
 else:
     st.info("👈 좌측 상단 메뉴 혹은 위쪽 버튼을 통해 데이터 파일을 업로드해주세요.")
