@@ -511,33 +511,62 @@ def run_psm(
     replace: bool = False,
 ) -> tuple:
     """
-    Performs Propensity Score Matching using logistic regression to estimate propensity scores.
+    Performs Propensity Score Matching using logistic regression–based propensity scores.
 
-    caliper <= 0 이면 caliper 없이 매칭합니다.
-    ratio : Treated 1명당 Control 몇 명을 매칭할지 (1 = 1:1).
-    replace : 같은 control이 여러 treated에 매칭될 수 있는지 여부.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame containing treatment, covariates, and other relevant data.
+    treatment_col : str
+        Column name for treatment (expected to be binary 0/1).
+    covariates : list
+        List of covariate column names to use for PSM.
+    caliper : float, default 0.2
+        Caliper width, expressed as a fraction of the standard deviation of
+        the logit propensity score.
+    ratio : int, default 1
+        Target number of controls per treated (1:n 매칭에서 n에 해당). 이는
+        각 treated 당 **최대** 매칭 가능한 control 수를 의미합니다.
+    replace : bool, default False
+        If True, the same control can be matched to multiple treated subjects
+        (matching with replacement). If False, each control is used at most once.
+
+    Returns
+    -------
+    matched_df_full : pd.DataFrame or None
+        Subset of the original `df` that was successfully matched
+        (treated + matched controls), with `propensity_score` and `logit_ps`
+        columns added. Returns None if matching fails.
+    data_with_scores : pd.DataFrame or None
+        Complete-case data used for PS estimation (treatment + covariates only),
+        with `propensity_score` and `logit_ps` added, for pre-matching balance checks.
     """
-    data = df[[treatment_col] + covariates].dropna()
+    if ratio is None or ratio < 1:
+        ratio = 1
+    ratio = int(ratio)
+
+    # 1) Complete-case on treatment + covariates
+    cols_needed = [treatment_col] + list(covariates)
+    data = df[cols_needed].dropna()
+
     if data.empty:
         return None, None
 
+    # 2) Logistic regression for PS
     X = pd.get_dummies(data[covariates], drop_first=True, dtype=float)
     y = data[treatment_col]
 
+    # Need at least two classes
     if y.nunique() < 2:
         return None, None
 
-    try:
-        ps_model = LogisticRegression(solver="liblinear", random_state=42)
-        ps_model.fit(X, y)
-    except Exception:
-        return None, None
-
-    data = data.copy()
+    ps_model = LogisticRegression(solver="liblinear", random_state=42)
+    ps_model.fit(X, y)
     data["propensity_score"] = ps_model.predict_proba(X)[:, 1]
 
-    ps_clip = np.clip(data["propensity_score"], 1e-6, 1 - 1e-6)
-    data["logit_ps"] = np.log(ps_clip / (1 - ps_clip))
+    # 3) logit(PS)
+    ps_clipped = np.clip(data["propensity_score"].to_numpy(), 1e-6, 1 - 1e-6)
+    data["logit_ps"] = np.log(ps_clipped / (1 - ps_clipped))
 
     treated = data[data[treatment_col] == 1]
     control = data[data[treatment_col] == 0]
@@ -545,49 +574,63 @@ def run_psm(
     if treated.empty or control.empty:
         return None, None
 
-    std_logit = data["logit_ps"].std()
-    if caliper is None or caliper <= 0 or std_logit == 0 or np.isnan(std_logit):
-        caliper_val = None
-    else:
-        caliper_val = caliper * std_logit
+    # 4) Caliper & nearest-neighbor matching on logit PS
+    sd_logit = data["logit_ps"].std()
+    if sd_logit == 0 or np.isnan(sd_logit):
+        return None, None
+    caliper_val = caliper * sd_logit
 
-    ratio = max(1, int(ratio))
-    n_neighbors = min(ratio, len(control))
+    n_neighbors = min(max(1, ratio), len(control))
     nbrs = NearestNeighbors(
-        n_neighbors=n_neighbors, algorithm="ball_tree", metric="euclidean"
+        n_neighbors=n_neighbors,
+        algorithm="ball_tree",
+        metric="euclidean",
     )
     nbrs.fit(control[["logit_ps"]])
     distances, indices = nbrs.kneighbors(treated[["logit_ps"]])
 
-    matched_pairs = []
-    used_controls = set()
+    matched_pairs = []      # (treated_idx, control_idx)
+    used_controls = set()   # for no-replacement matching
 
-    for i, (dist_row, idx_row) in enumerate(zip(distances, indices)):
-        t_idx = treated.index[i]
-        num_matched = 0
-        for dist, idx in zip(dist_row, idx_row):
-            c_idx = control.index[idx]
+    treated_idx_list = list(treated.index)
 
-            if caliper_val is not None and dist > caliper_val:
+    for row_i, t_idx in enumerate(treated_idx_list):
+        dists = distances[row_i]
+        idxs = indices[row_i]
+
+        matched_for_this_t = 0
+
+        for d, c_pos in zip(dists, idxs):
+            if d > caliper_val:
                 continue
+
+            c_idx = control.index[c_pos]
+
             if not replace and c_idx in used_controls:
                 continue
 
             matched_pairs.append((t_idx, c_idx))
-            used_controls.add(c_idx)
-            num_matched += 1
-            if num_matched >= ratio:
+            matched_for_this_t += 1
+            if not replace:
+                used_controls.add(c_idx)
+
+            if matched_for_this_t >= ratio:
                 break
 
     if not matched_pairs:
         return None, None
 
-    matched_idx = [t for t, _ in matched_pairs] + [c for _, c in matched_pairs]
-    matched_df = data.loc[matched_idx]
+    # 5) Unique sets of matched treated & controls
+    matched_treated_idx = sorted({t for t, _ in matched_pairs})
+    matched_control_idx = sorted({c for _, c in matched_pairs})
+    matched_index = matched_treated_idx + matched_control_idx
 
-    matched_df_full = df.loc[matched_df.index].copy()
-    matched_df_full["propensity_score"] = matched_df["propensity_score"]
-    matched_df_full["logit_ps"] = matched_df["logit_ps"]
+    matched_scores = data.loc[matched_index].copy()
+
+    # Map back to original df to preserve all columns
+    matched_df_full = df.loc[matched_index].copy()
+    matched_df_full["propensity_score"] = matched_scores["propensity_score"]
+    matched_df_full["logit_ps"] = matched_scores["logit_ps"]
 
     return matched_df_full, data
 
@@ -684,3 +727,4 @@ def plot_roc_curve(
     ax.legend(loc="lower right")
     ax.grid(True, alpha=0.3)
     return fig, roc_auc
+
