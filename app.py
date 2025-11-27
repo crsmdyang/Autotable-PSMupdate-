@@ -1,7 +1,8 @@
 # Page Config
 import streamlit as st
-import hashlib
-from pathlib import Path
+import os
+from datetime import datetime
+
 
 st.set_page_config(
     page_title="Medical Statistics Analysis",
@@ -39,26 +40,31 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     
-    /* Cards/Containers */
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 0.5rem 1rem;
+        border-radius: 8px 8px 0 0;
+        background-color: #393E46;
+        color: #EEEEEE;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #00ADB5 !important;
+        color: white !important;
+    }
+    
+    /* DataFrames */
     .stDataFrame, .stTable {
         border-radius: 10px;
         overflow: hidden;
         border: 1px solid #393E46;
     }
     
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 4px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #222831;
-        color: white;
-        border-radius: 8px 8px 0 0;
-        padding: 0.4rem 0.8rem;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #00ADB5 !important;
-        color: white !important;
+    /* Info Boxes */
+    .stAlert {
+        border-radius: 8px;
     }
     
     /* Sidebar */
@@ -83,254 +89,254 @@ except ImportError as e:
     st.error(f"Module Import Error: {e}")
     st.stop()
 
-# =============================================================
-# Simple File-based Authentication
-# =============================================================
-
-USERS_FILE = Path("users.csv")
-USER_COLUMNS = [
-    "username",
-    "password_hash",
+# ------------------------------------------------------------------
+# Simple User Authentication (Login / Signup / Password reset / ID find)
+# ------------------------------------------------------------------
+USER_DB_PATH = "users_db.csv"
+USER_DB_COLUMNS = [
+    "user_id",
+    "password",
     "hospital",
-    "department",
+    "affiliation",
     "position",
     "name",
-    "is_admin",
+    "role",
+    "created_at",
 ]
 
 
-def _hash_password(password: str) -> str:
-    """Return SHA256 hash of the password."""
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+def _init_user_db():
+    """Ensure that the user DB exists and has at least one admin account."""
+    if not os.path.exists(USER_DB_PATH):
+        df = pd.DataFrame(columns=USER_DB_COLUMNS)
+        # 기본 관리자 계정 (ID/비밀번호는 필요에 따라 수정하세요)
+        df.loc[len(df)] = [
+            "admin",            # user_id
+            "admin1234",        # password
+            "Admin Hospital",   # hospital
+            "Admin",            # affiliation
+            "관리자",            # position
+            "Administrator",    # name
+            "admin",            # role
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ]
+        df.to_csv(USER_DB_PATH, index=False, encoding="utf-8")
 
 
-def _save_users(df: pd.DataFrame) -> None:
-    """Save users dataframe to CSV, keeping only known columns."""
-    # Ensure all columns exist
-    for col in USER_COLUMNS:
+def load_user_db():
+    """Load user database as DataFrame."""
+    _init_user_db()
+    try:
+        df = pd.read_csv(USER_DB_PATH, dtype=str, encoding="utf-8")
+    except Exception:
+        df = pd.DataFrame(columns=USER_DB_COLUMNS)
+    # 컬럼 누락 시 보정
+    for col in USER_DB_COLUMNS:
         if col not in df.columns:
-            df[col] = "" if col != "is_admin" else False
-    df = df[USER_COLUMNS].copy()
-    df.to_csv(USERS_FILE, index=False)
+            df[col] = ""
+    return df[USER_DB_COLUMNS]
 
 
-def _load_users() -> pd.DataFrame:
-    """Load users CSV and ensure at least one admin exists."""
-    if USERS_FILE.exists():
-        try:
-            users = pd.read_csv(USERS_FILE)
-        except Exception:
-            users = pd.DataFrame(columns=USER_COLUMNS)
-    else:
-        users = pd.DataFrame(columns=USER_COLUMNS)
-
-    # Ensure mandatory columns
-    for col in USER_COLUMNS:
-        if col not in users.columns:
-            users[col] = "" if col != "is_admin" else False
-
-    # Normalize is_admin to bool
-    if "is_admin" in users.columns:
-        users["is_admin"] = (
-            users["is_admin"].astype(str).str.lower().isin(["true", "1", "yes"])
-        )
-    else:
-        users["is_admin"] = False
-
-    # Ensure at least one admin user
-    if not users["is_admin"].any():
-        default_admin = {
-            "username": "admin",
-            "password_hash": _hash_password("admin1234"),
-            "hospital": "",
-            "department": "",
-            "position": "Admin",
-            "name": "Administrator",
-            "is_admin": True,
-        }
-        users = pd.concat([users, pd.DataFrame([default_admin])], ignore_index=True)
-        _save_users(users)
-
-    return users
+def save_user_db(df):
+    """Save user database DataFrame."""
+    try:
+        df.to_csv(USER_DB_PATH, index=False, encoding="utf-8")
+    except Exception as e:
+        st.error(f"사용자 DB 저장 중 오류가 발생했습니다: {e}")
 
 
-def _authenticate(users: pd.DataFrame, username: str, password: str):
-    """Return user dict if username/password match, else None."""
-    if not username or not password:
-        return None
-    pw_hash = _hash_password(password)
-    mask = (users["username"].astype(str) == username) & (
-        users["password_hash"].astype(str) == pw_hash
-    )
-    if not mask.any():
-        return None
-    return users.loc[mask].iloc[0].to_dict()
+def render_auth_block():
+    """Render login / signup / password reset / ID find UI.
 
-
-def _register_user(
-    users: pd.DataFrame,
-    username: str,
-    pw1: str,
-    pw2: str,
-    hospital: str,
-    department: str,
-    position: str,
-    name: str,
-):
-    """Register a new non-admin user."""
-    if not username:
-        return False, "아이디를 입력해주세요."
-    if not pw1 or not pw2:
-        return False, "비밀번호를 입력해주세요."
-    if pw1 != pw2:
-        return False, "비밀번호 확인이 일치하지 않습니다."
-
-    if username in users["username"].astype(str).tolist():
-        return False, "이미 사용 중인 아이디입니다."
-
-    new_user = {
-        "username": username,
-        "password_hash": _hash_password(pw1),
-        "hospital": hospital or "",
-        "department": department or "",
-        "position": position or "",
-        "name": name or "",
-        "is_admin": False,
-    }
-
-    updated = pd.concat([users, pd.DataFrame([new_user])], ignore_index=True)
-    _save_users(updated)
-    return True, "회원가입이 완료되었습니다. 이제 로그인해 주세요."
-
-
-def _reset_password(
-    users: pd.DataFrame,
-    username: str,
-    name: str,
-    hospital: str,
-    pw1: str,
-    pw2: str,
-):
-    """Simple password reset using (username, name, hospital) verification."""
-    if not username:
-        return False, "아이디를 입력해주세요."
-    if not name:
-        return False, "이름을 입력해주세요."
-    if not hospital:
-        return False, "병원명을 입력해주세요."
-    if not pw1 or not pw2:
-        return False, "새 비밀번호를 입력해주세요."
-    if pw1 != pw2:
-        return False, "비밀번호 확인이 일치하지 않습니다."
-
-    mask = (
-        users["username"].astype(str) == username
-    ) & (
-        users["name"].astype(str) == name
-    ) & (
-        users["hospital"].astype(str) == hospital
-    )
-    if not mask.any():
-        return False, "입력하신 정보와 일치하는 사용자가 없습니다. 관리자에게 문의해주세요."
-
-    users.loc[mask, "password_hash"] = _hash_password(pw1)
-    _save_users(users)
-    return True, "비밀번호가 변경되었습니다. 새 비밀번호로 로그인해 주세요."
-
-
-def require_login():
-    """Render login / signup / reset UI and return logged-in user dict if any.
-
-    - 로그인 상태라면 바로 사용자 정보를 반환
-    - 로그인하지 않았다면 로그인/회원가입/비밀번호 재설정 탭을 보여주고 None 반환
+    Returns
+    -------
+    user : dict or None
+        Logged-in user info if authenticated, else None.
+    users_df : pd.DataFrame
+        Current user database.
     """
-    # 이미 로그인 되어 있으면 곧바로 반환
-    user = st.session_state.get("auth_user")
-    if user is not None:
-        return user
+    users_df = load_user_db()
+    current_user = st.session_state.get("current_user")
 
-    users = _load_users()
+    # 이미 로그인 된 경우: 간단 정보 + 로그아웃 버튼
+    if current_user is not None:
+        with st.sidebar:
+            st.success(
+                f"로그인: {current_user.get('name', '')} "
+                f"({current_user.get('user_id', '')})"
+            )
+            if st.button("로그아웃", key="btn_logout"):
+                st.session_state.pop("current_user", None)
+                st.experimental_rerun()
+        return current_user, users_df
 
-    st.title("🔐 로그인")
-    st.caption("의료 통계 분석 도구 사용을 위해 먼저 로그인 해주세요.")
+    # 로그인되지 않은 상태: 로그인/회원가입/비밀번호 찾기/아이디 찾기 탭
+    st.markdown("### 🔐 로그인")
+    tab_login, tab_signup, tab_reset_pw, tab_find_id = st.tabs(
+        ["로그인", "회원가입", "비밀번호 재설정", "아이디 찾기"]
+    )
 
-    tab_login, tab_signup, tab_reset = st.tabs(["로그인", "회원가입", "비밀번호 찾기 / 재설정"])
-
+    # -------------------------------
     # 로그인 탭
+    # -------------------------------
     with tab_login:
-        with st.form("login_form"):
-            username = st.text_input("아이디", key="login_username")
-            password = st.text_input("비밀번호", type="password", key="login_password")
-            submitted = st.form_submit_button("로그인")
-        if submitted:
-            user = _authenticate(users, username, password)
-            if user:
-                st.session_state["auth_user"] = user
-                st.success("로그인되었습니다.")
-                st.rerun()
-            else:
-                st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+        login_id = st.text_input("아이디", key="login_id")
+        login_pw = st.text_input("비밀번호", type="password", key="login_pw")
 
+        if st.button("로그인", key="btn_login"):
+            row = users_df[users_df["user_id"] == login_id]
+            if row.empty:
+                st.error("존재하지 않는 아이디입니다.")
+            else:
+                stored_pw = str(row.iloc[0]["password"])
+                if stored_pw != login_pw:
+                    st.error("비밀번호가 올바르지 않습니다.")
+                else:
+                    user = row.iloc[0].to_dict()
+                    st.session_state["current_user"] = user
+                    st.success(f"{user.get('name', '')}님 환영합니다.")
+                    st.experimental_rerun()
+
+    # -------------------------------
     # 회원가입 탭
+    # -------------------------------
     with tab_signup:
-        with st.form("signup_form"):
-            su_username = st.text_input("아이디", key="signup_username")
-            su_pw1 = st.text_input("비밀번호", type="password", key="signup_pw1")
-            su_pw2 = st.text_input("비밀번호 확인", type="password", key="signup_pw2")
-            su_hosp = st.text_input("병원명", key="signup_hospital")
-            su_dept = st.text_input("소속", key="signup_department")
-            su_pos = st.text_input("직책 (예: 교수)", key="signup_position")
-            su_name = st.text_input("이름", key="signup_name")
-            su_submit = st.form_submit_button("회원가입")
-        if su_submit:
-            success, msg = _register_user(
-                users,
-                su_username,
-                su_pw1,
-                su_pw2,
-                su_hosp,
-                su_dept,
-                su_pos,
-                su_name,
-            )
-            if success:
-                st.success(msg)
-            else:
-                st.error(msg)
+        st.markdown("#### 새 계정 생성")
 
+        reg_id = st.text_input("아이디", key="reg_id")
+        reg_pw = st.text_input("비밀번호", type="password", key="reg_pw")
+        reg_pw2 = st.text_input("비밀번호 확인", type="password", key="reg_pw2")
+        reg_hospital = st.text_input("병원명", key="reg_hospital")
+        reg_affiliation = st.text_input("소속 (예: 대장항문외과)", key="reg_affiliation")
+        reg_position = st.text_input("직책 (예: 교수)", value="교수", key="reg_position")
+        reg_name = st.text_input("이름", key="reg_name")
+
+        if st.button("회원가입", key="btn_signup"):
+            if not reg_id or not reg_pw or not reg_name:
+                st.error("아이디, 비밀번호, 이름은 필수 입력 항목입니다.")
+            elif reg_pw != reg_pw2:
+                st.error("비밀번호가 일치하지 않습니다.")
+            elif (users_df["user_id"] == reg_id).any():
+                st.error("이미 사용 중인 아이디입니다.")
+            else:
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            "user_id": reg_id,
+                            "password": reg_pw,
+                            "hospital": reg_hospital,
+                            "affiliation": reg_affiliation,
+                            "position": reg_position,
+                            "name": reg_name,
+                            "role": "user",
+                            "created_at": datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                        }
+                    ]
+                )
+                users_df = pd.concat([users_df, new_row], ignore_index=True)
+                save_user_db(users_df)
+                st.success("회원가입이 완료되었습니다. 이제 로그인 해 주세요.")
+                # 회원가입 후 바로 로그인 탭으로 이동
+                st.session_state["auth_active_tab"] = "login"
+                st.experimental_rerun()
+
+    # -------------------------------
     # 비밀번호 재설정 탭
-    with tab_reset:
-        with st.form("reset_form"):
-            r_username = st.text_input("아이디", key="reset_username")
-            r_name = st.text_input("이름", key="reset_name")
-            r_hosp = st.text_input("병원명", key="reset_hospital")
-            r_pw1 = st.text_input("새 비밀번호", type="password", key="reset_pw1")
-            r_pw2 = st.text_input("새 비밀번호 확인", type="password", key="reset_pw2")
-            r_submit = st.form_submit_button("비밀번호 재설정")
-        if r_submit:
-            success, msg = _reset_password(
-                users,
-                r_username,
-                r_name,
-                r_hosp,
-                r_pw1,
-                r_pw2,
+    # -------------------------------
+    with tab_reset_pw:
+        st.markdown("#### 비밀번호 재설정")
+        rp_id = st.text_input("아이디", key="rp_id")
+        rp_name = st.text_input("이름", key="rp_name")
+        rp_hospital = st.text_input("병원명", key="rp_hospital")
+        new_pw = st.text_input("새 비밀번호", type="password", key="rp_new_pw")
+        new_pw2 = st.text_input("새 비밀번호 확인", type="password", key="rp_new_pw2")
+
+        if st.button("비밀번호 재설정", key="btn_reset_pw"):
+            cond = (
+                (users_df["user_id"] == rp_id)
+                & (users_df["name"] == rp_name)
+                & (users_df["hospital"] == rp_hospital)
             )
-            if success:
-                st.success(msg)
+            row = users_df[cond]
+            if row.empty:
+                st.error("일치하는 회원 정보를 찾을 수 없습니다.")
+            elif new_pw != new_pw2 or not new_pw:
+                st.error("새 비밀번호가 일치하지 않거나 비어 있습니다.")
             else:
-                st.error(msg)
+                users_df.loc[cond, "password"] = new_pw
+                save_user_db(users_df)
+                st.success("비밀번호가 재설정되었습니다. 새 비밀번호로 로그인해 주세요.")
+                # 비밀번호 재설정 후 로그인 탭으로 이동
+                st.session_state["auth_active_tab"] = "login"
+                st.experimental_rerun()
 
-    return None
+    # -------------------------------
+    # 아이디 찾기 탭
+    # -------------------------------
+    with tab_find_id:
+        st.markdown("#### 아이디 찾기")
+        fid_name = st.text_input("이름", key="fid_name")
+        fid_hospital = st.text_input("병원명", key="fid_hospital")
+
+        if st.button("아이디 찾기", key="btn_find_id"):
+            cond = (
+                (users_df["name"] == fid_name)
+                & (users_df["hospital"] == fid_hospital)
+            )
+            rows = users_df[cond]
+            if rows.empty:
+                st.error("일치하는 회원 정보를 찾을 수 없습니다.")
+            else:
+                ids = rows["user_id"].dropna().unique().tolist()
+                if len(ids) == 1:
+                    st.success(f"해당 정보로 등록된 아이디는 **{ids[0]}** 입니다.")
+                else:
+                    joined_ids = ", ".join(ids)
+                    st.success(
+                        f"해당 정보로 등록된 아이디는 다음과 같습니다: **{joined_ids}**"
+                    )
+
+    # 로그인/회원가입/비밀번호/아이디 찾기만 보여주는 상태
+    return None, users_df
 
 
-# =============================================================
-# 기존 데이터 업로드 및 분석 함수들
-# =============================================================
+def render_admin_view(users_df):
+    """Admin 전용: 가입자 목록 화면"""
+    st.title("👨‍💼 관리자 화면")
+    st.caption("가입한 사용자 목록을 확인할 수 있는 관리자 전용 화면입니다.")
 
+    if users_df is None or users_df.empty:
+        st.info("아직 가입된 사용자가 없습니다.")
+        return
+
+    display_cols = [
+        "user_id",
+        "name",
+        "hospital",
+        "affiliation",
+        "position",
+        "role",
+        "created_at",
+    ]
+    existing_cols = [c for c in display_cols if c in users_df.columns]
+
+    st.dataframe(users_df[existing_cols], use_container_width=True)
+    st.caption(
+        "※ 기본 admin 계정(ID: admin / PW: admin1234)은 필요 시 "
+        "users_db.csv 에서 수정 가능합니다."
+    )
+
+# ------------------------------------------------------------------
+# 기존 세션/데이터 로딩 함수
+# ------------------------------------------------------------------
 def reset_session_state(new_file_id):
     """Resets session state variables when a new file is uploaded."""
-    if "last_file_id" not in st.session_state or st.session_state["last_file_id"] != new_file_id:
+    if (
+        "last_file_id" not in st.session_state
+        or st.session_state["last_file_id"] != new_file_id
+    ):
         keys_to_clear = [
             "var_config_df",
             "psm_var_config",
@@ -356,10 +362,15 @@ def load_data(uploaded_file):
         df = None
         file_ext = uploaded_file.name.split(".")[-1].lower()
 
+        # Reset pointer to beginning
+        uploaded_file.seek(0)
+
         selected_sheet = None
 
         if file_ext == "csv":
-            use_header = st.checkbox("Use first row as header", value=True, key="csv_use_header")
+            use_header = st.checkbox(
+                "Use first row as header", value=True, key="csv_use_header"
+            )
             header_opt = 0 if use_header else None
             df = pd.read_csv(uploaded_file, header=header_opt)
 
@@ -369,9 +380,13 @@ def load_data(uploaded_file):
 
             selected_sheet = sheet_names[0]
             if len(sheet_names) > 1:
-                selected_sheet = st.selectbox("Select Sheet", sheet_names, key="sheet_selector")
+                selected_sheet = st.selectbox(
+                    "Select Sheet", sheet_names, key="sheet_selector"
+                )
 
-            use_header = st.checkbox("Use first row as header", value=True, key="excel_use_header")
+            use_header = st.checkbox(
+                "Use first row as header", value=True, key="excel_use_header"
+            )
             header_opt = 0 if use_header else None
             df = xl.parse(selected_sheet, header=header_opt)
 
@@ -385,74 +400,80 @@ def load_data(uploaded_file):
         st.error(f"Error loading file: {e}")
         return None, None
 
-
+# ------------------------------------------------------------------
+# 메인 함수: 로그인 → 모드 선택(통계/관리자) → 통계 탭
+# ------------------------------------------------------------------
 def main():
-    # 1) 인증 먼저 수행
-    user = require_login()
-    if user is None:
-        # 로그인 화면만 보여주고 종료
-        return
-
-    # 2) 로그인 이후 메인 타이틀 / 사용자 정보 표시
     st.title("📊 Medical Statistics Analysis Tool")
     st.caption("Integrated Statistical Analysis Platform for Medical Research")
 
-    # 사용자 정보 및 로그아웃 버튼은 사이드바에 표시
+    # 1) 로그인 / 회원가입 / 비밀번호 / 아이디 찾기
+    user, users_df = render_auth_block()
+    if user is None:
+        # 로그인 화면을 보여준 상태에서는 아래 분석 화면을 렌더링하지 않음
+        return
+
+    # 2) Sidebar: 사용자 정보 + 모드 선택 + (통계 모드일 때) 데이터 업로드
+    uploaded_file = None
+    mode = "통계 분석"
     with st.sidebar:
-        st.markdown("### 👤 사용자 정보")
-        st.write(f"**이름:** {user.get('name', '')}")
-        st.write(f"**아이디:** {user.get('username', '')}")
-        if user.get("hospital") or user.get("department"):
-            st.write(f"**소속:** {user.get('hospital', '')} {user.get('department', '')}")
-        if user.get("position"):
-            st.write(f"**직책:** {user.get('position', '')}")
-
-        if st.button("로그아웃", key="logout_btn"):
-            st.session_state.pop("auth_user", None)
-            st.rerun()
-
-        st.write("---")
-        st.header("📂 Data Upload & Settings")
-        st.info("Upload Excel (.xlsx) or CSV (.csv) file.")
-        uploaded_file = st.file_uploader("Select File", type=["xlsx", "csv"])
-
-        st.write("---")
-        st.markdown("### ℹ️ Help")
+        st.header("👤 사용자 정보")
         st.markdown(
-            """
-        - **Table 1**: Baseline Characteristics (T-test, Chi-square, etc.)
-        - **Cox Regression**: Survival Analysis (Kaplan-Meier, Cox PH)
-        - **Logistic Regression**: Binary Outcome Prediction (ROC Curve)
-        - **PSM**: Propensity Score Matching
-        """
+            f"**이름:** {user.get('name', '')}  \\n"
+            f"**아이디:** {user.get('user_id', '')}  \\n"
+            f"**병원:** {user.get('hospital', '')}"
         )
+        st.write("---")
 
-    # 3) 관리자 전용: 가입자 목록 보기
-    if user.get("is_admin"):
-        st.markdown("---")
-        st.subheader("👑 관리자 패널: 가입자 목록")
-        admin_users = _load_users().copy()
-        if not admin_users.empty:
-            admin_view = admin_users.drop(columns=["password_hash"], errors="ignore")
-            st.dataframe(admin_view, use_container_width=True)
+        # 관리자라면 모드 선택 가능
+        if user.get("role") == "admin":
+            mode = st.radio(
+                "모드 선택",
+                ["통계 분석", "관리자 화면"],
+                key="sidebar_mode",
+            )
         else:
-            st.info("아직 가입된 사용자가 없습니다.")
+            mode = "통계 분석"
 
-    # 4) 데이터 업로드 후 통계 분석 탭 표시
+        st.write("---")
+
+        if mode == "통계 분석":
+            st.header("📂 Data Upload & Settings")
+            st.info("Upload Excel (.xlsx) or CSV (.csv) file.")
+            uploaded_file = st.file_uploader("Select File", type=["xlsx", "csv"])
+
+            st.write("---")
+            st.markdown("### ℹ️ Help")
+            st.markdown(
+                "- **Table 1**: Baseline Characteristics (T-test, Chi-square, etc.)\\n"
+                "- **Cox Regression**: Survival Analysis (Kaplan-Meier, Cox PH)\\n"
+                "- **Logistic Regression**: Binary Outcome Prediction (ROC Curve)\\n"
+                "- **PSM**: Propensity Score Matching"
+            )
+
+    # 3) 관리자 화면
+    if user.get("role") == "admin" and mode == "관리자 화면":
+        render_admin_view(users_df)
+        return
+
+    # 4) 통계 분석 화면 (기존 로직)
     if uploaded_file is not None:
+        # Load Data
         df, sheet_name = load_data(uploaded_file)
 
         if df is not None:
+            # Generate File ID
             current_file_id = f"{uploaded_file.name}_{uploaded_file.size}"
             if sheet_name:
                 current_file_id += f"_{sheet_name}"
 
+            # Reset Session if needed
             reset_session_state(current_file_id)
 
             st.success("File uploaded successfully!")
             st.dataframe(df.head())
 
-            # 탭 구성 (현재는 관리자/일반 사용자 모두 동일한 탭 구조)
+            # Create Tabs
             tab1, tab2, tab3, tab4, tab_methods = st.tabs(
                 [
                     "📊 Table 1 (Baseline)",
@@ -463,6 +484,7 @@ def main():
                 ]
             )
 
+            # Render Tabs
             with tab1:
                 render_tab1(df)
             with tab2:
