@@ -25,13 +25,13 @@ def render_tab4(df: pd.DataFrame) -> None:
     """
     st.subheader("Propensity Score Matching (PSM)")
     st.info(
-        """
-        💡 **PSM**는 관찰연구에서 선택 편향을 줄이기 위해,
-        치료군과 대조군의 특성이 비슷하도록 짝을 맞추는 방법입니다.
+        '''
+        💡 **PSM** is used to reduce selection bias in observational studies
+        by matching treated and control patients with similar propensity scores.
 
-        - **Treatment Variable**: 치료군/대조군을 구분하는 변수
-        - **Covariates**: Propensity score 계산에 사용하는 공변량(매칭 변수)
-        """
+        - **Treatment Variable**: variable indicating treatment assignment (case vs control)
+        - **Covariates**: variables used to estimate the propensity score (matching variables)
+        '''
     )
 
     # ------------------------------------------------------------------
@@ -39,249 +39,345 @@ def render_tab4(df: pd.DataFrame) -> None:
     # ------------------------------------------------------------------
     c1, c2 = st.columns(2)
 
-    # Treatment column (group variable)
+    # Treatment column (use original keys so reset_session_state() works)
     tc = c1.selectbox(
         "Treatment Variable (0/1 or Yes/No)",
         options=df.columns,
         key="p_t",
-        help="치료군과 대조군을 구분하는 변수를 선택하세요.",
+        help="Variable that distinguishes treatment and control groups.",
     )
 
-    # Which value is treated (coded as 1)
+    # Value that will be coded as 1 (treated)
     t1 = None
     if tc:
         vals = df[tc].dropna().unique()
         if len(vals) == 2:
             t1 = c2.selectbox(
-                "Treated value (Case = 1)",
+                "Treated value (coded as 1)",
                 options=vals,
                 key="p_v",
-                help="선택한 값이 치료군(1)으로 코딩됩니다.",
+                help="Select the value that represents the treated group.",
             )
         else:
             st.warning(
-                "⚠️ Treatment variable 은 정확히 2개의 값(예: 0/1, Yes/No)만 가져야 합니다."
+                "⚠️ Treatment variable must have exactly 2 unique values "
+                "(e.g., 0/1, Yes/No)."
             )
 
-    # Covariates used *only* for propensity score estimation
+    # Covariates used to estimate propensity score (matching variables)
     covs = st.multiselect(
-        "Covariates for propensity score (매칭에 사용할 공변량)",
+        "Covariates for propensity score (matching variables)",
         options=[c for c in df.columns if c != tc],
         key="p_c",
-        help="이 변수들로 propensity score를 계산하고 매칭을 수행합니다.",
+        help="Variables used in the logistic model to estimate propensity score.",
     )
 
-    # Caliper width in SD of logit(PS)
+    # Caliper width (in SD of logit PS)
     cal = st.slider(
         "Caliper width (SD of logit PS)",
         min_value=0.0,
         max_value=1.0,
         value=0.2,
         step=0.01,
-        help="logit(propensity score)의 표준편차 × 값 만큼 거리 이내에서만 매칭합니다.",
+        help="Maximum allowed distance in logit propensity score for matching. "
+        "Smaller values → stricter matching → matched N decreases.",
     )
 
     # ------------------------------------------------------------------
     # 2. Run PSM
     # ------------------------------------------------------------------
-    if st.button("Run PSM", key="psm_run"):
+    if st.button("Run PSM", key="psm_run_button"):
         if tc is None or t1 is None:
-            st.error("Treatment variable과 treated value를 먼저 올바르게 선택하세요.")
+            st.error("Please select a valid treatment variable and treated value.")
         elif not covs:
-            st.error("최소 1개 이상의 covariate를 선택해야 합니다.")
+            st.error("Please select at least one covariate for matching.")
         else:
-            with st.spinner("PSM 수행 중..."):
+            with st.spinner("Running PSM..."):
                 dp = df.copy()
 
-                # 내부용 이진 treatment 변수 (__T: 1=treated, 0=control)
+                # Create binary treatment indicator used inside run_psm
                 dp["__T"] = np.where(dp[tc] == t1, 1, 0)
 
-                # run_psm는 내부적으로 결측(dropna)과 caliper를 적용합니다.
-                m_df, org = run_psm(dp, "__T", covs, cal)
+                # Keep original before matching for SMD "Before"
+                org_df = dp.copy()
 
-                if m_df is None:
+                matched_df, org_out = run_psm(dp, "__T", covs, cal)
+
+                # run_psm may return a reduced data frame for "before" (only
+                # treatment + covariates + PS). Use it if available.
+                if org_out is not None:
+                    org_df = org_out
+
+                if matched_df is None or len(matched_df) == 0:
                     st.error(
-                        "Matching에 실패했습니다. caliper를 넓히거나, covariate 개수를 줄이거나, "
-                        "결측값을 정리한 뒤 다시 시도해 보세요."
+                        "Matching failed: no valid matches found. "
+                        "Try relaxing the caliper (larger value) or reducing covariates."
                     )
+                    # Clear previous results to avoid confusion
+                    for k in [
+                        "psm_done",
+                        "psm_matched_df",
+                        "psm_org_df",
+                        "psm_covs",
+                        "psm_treat_col",
+                        "psm_var_config",
+                        "psm_t1_selected_vals",
+                    ]:
+                        st.session_state.pop(k, None)
                 else:
-                    # 새로 매칭할 때마다 이전 Table 1 설정은 초기화
-                    if "psm_var_config" in st.session_state:
-                        del st.session_state["psm_var_config"]
-
+                    # Save to session_state for later use (SMD, Table 1, download)
                     st.session_state["psm_done"] = True
-                    st.session_state["psm_matched_df"] = m_df
-                    st.session_state["psm_org_df"] = org
-                    # covs, tc는 위젯 key(p_t, p_c)에서 항상 복원되므로 별도 저장 불필요
+                    st.session_state["psm_matched_df"] = matched_df
+                    st.session_state["psm_org_df"] = org_df
+                    st.session_state["psm_covs"] = covs
+                    st.session_state["psm_treat_col"] = tc
+                    # Table 1 config will be (re)initialised below as needed
 
     # ------------------------------------------------------------------
     # 3. Show results if matching has been performed
     # ------------------------------------------------------------------
-    required_keys = ["psm_done", "psm_matched_df", "psm_org_df"]
-    if not all(k in st.session_state for k in required_keys):
-        return
-    if not st.session_state.get("psm_done"):
-        return
-
-    m_df: pd.DataFrame = st.session_state["psm_matched_df"]
-    org: pd.DataFrame = st.session_state["psm_org_df"]
-
-    # 최신 위젯 상태(=실제 사용자가 선택해 둔 값)를 다시 가져옴
-    tc = st.session_state.get("p_t")
-    covs = st.session_state.get("p_c", [])
-
-    if tc is None or tc not in df.columns:
-        st.error("현재 선택된 treatment variable이 유효하지 않습니다. 다시 선택 후 매칭을 실행하세요.")
-        return
-
-    st.success(f"✅ Matching complete! (Matched N = {len(m_df)})")
-
-    # ------------------------------------------------------------------
-    # 3-1. Balance check: SMD before / after (for covariates only)
-    # ------------------------------------------------------------------
-    if covs:
-        st.markdown("### ⚖️ Balance Check (SMD)")
-        st.caption("일반적으로 |SMD| < 0.1 이면 공변량 균형이 잘 맞았다고 봅니다.")
-
-        # org, m_df 모두 __T(0/1)를 사용해서 SMD 계산
-        sb = calculate_smd(org, "__T", covs)
-        sa = calculate_smd(m_df, "__T", covs)
-        sm = pd.merge(sb, sa, on="Variable", suffixes=("_Before", "_After"))
-
-        st.dataframe(
-            sm.style.format({"SMD_Before": "{:.3f}", "SMD_After": "{:.3f}"})
-        )
-
-        # SMD plot
-        fig, ax = plt.subplots(figsize=(8, 6))
-        sns.scatterplot(
-            data=sm,
-            x="SMD_Before",
-            y="Variable",
-            color="red",
-            label="Before matching",
-            s=100,
-            ax=ax,
-        )
-        sns.scatterplot(
-            data=sm,
-            x="SMD_After",
-            y="Variable",
-            color="blue",
-            label="After matching",
-            s=100,
-            ax=ax,
-        )
-        ax.axvline(0.1, ls="--", color="gray", alpha=0.5)
-        ax.axvline(-0.1, ls="--", color="gray", alpha=0.5)
-        ax.set_title("Standardized Mean Difference (SMD)")
-        ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
-
-    # ------------------------------------------------------------------
-    # 3-2. Download matched dataset
-    # ------------------------------------------------------------------
-    out_p = io.BytesIO()
-    with pd.ExcelWriter(out_p, engine="xlsxwriter") as w:
-        m_df.drop(columns=["__T", "logit_ps"], errors="ignore").to_excel(
-            w, index=False
-        )
-    st.download_button(
-        "📥 Download Matched Data",
-        data=out_p.getvalue(),
-        file_name="Matched_Data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    # ------------------------------------------------------------------
-    # 3-3. Matched Cohort Table 1 (사용자가 비교하고 싶은 변수 선택)
-    # ------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("📊 Matched Cohort Table 1")
-
-    # Matched data에서 사용할 수 있는 변수들:
-    #  - 내부용 __T, logit_ps, propensity_score, treatment variable 은 제외
-    avail_cols = [
-        c
-        for c in m_df.columns
-        if c not in ["__T", "logit_ps", "propensity_score", tc]
+    required_keys = [
+        "psm_done",
+        "psm_matched_df",
+        "psm_org_df",
+        "psm_covs",
+        "psm_treat_col",
     ]
-
-    # 세션에 저장된 설정이 없거나, 컬럼 구성이 달라졌으면 초기화
-    need_init = True
-    if "psm_var_config" in st.session_state:
-        prev = st.session_state["psm_var_config"]
-        if set(prev["Variable"].tolist()) == set(avail_cols):
-            need_init = False
-
-    if need_init:
-        init_rows = []
-        for c in avail_cols:
-            # 핵심: 매칭에 사용한 covariate 는 기본적으로 Include=False,
-            # 그 외 "나머지" 변수들은 기본적으로 Include=True
-            include_flag = c not in covs
-            init_rows.append(
-                {
-                    "Include": include_flag,
-                    "Variable": c,
-                    "Type": suggest_variable_type_single(m_df, c),
-                }
-            )
-        st.session_state["psm_var_config"] = pd.DataFrame(init_rows)
-
-    # Select All / Deselect All buttons
-    c_b1, c_b2, _ = st.columns([0.2, 0.2, 0.6])
-    if c_b1.button("✅ Select All (Matched)", key="psm_all"):
-        st.session_state["psm_var_config"]["Include"] = True
-        st.rerun()
-    if c_b2.button("⬜ Deselect All (Matched)", key="psm_none"):
-        st.session_state["psm_var_config"]["Include"] = False
-        st.rerun()
-
-    # Variable editor
-    psm_cfg = st.data_editor(
-        st.session_state["psm_var_config"],
-        column_config={
-            "Include": st.column_config.CheckboxColumn(width="small"),
-            "Variable": st.column_config.TextColumn(disabled=True),
-            "Type": st.column_config.SelectboxColumn(
-                options=["Continuous", "Categorical"]
-            ),
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        key="psm_editor",
+    _MISSING = object()
+    has_all_keys = all(
+        st.session_state.get(k, _MISSING) is not _MISSING for k in required_keys
     )
-    st.session_state["psm_var_config"] = psm_cfg
 
-    # 현재 선택 상태 파싱
-    sel = psm_cfg[psm_cfg["Include"] == True]
-    t_vars = sel["Variable"].tolist()
-    u_cont = sel[sel["Type"] == "Continuous"]["Variable"].tolist()
-    u_cat = sel[sel["Type"] == "Categorical"]["Variable"].tolist()
+    if has_all_keys and st.session_state.get("psm_done"):
+        m_df: pd.DataFrame = st.session_state["psm_matched_df"]
+        org: pd.DataFrame = st.session_state["psm_org_df"]
+        covs = st.session_state["psm_covs"]
+        tc = st.session_state["psm_treat_col"]
 
-    # value_map: treatment variable 의 실제 값 → 문자열
-    mt_vals = m_df[tc].unique()
-    val_map = {v: str(v) for v in mt_vals}
+        # --------------------------------------------------------------
+        # 3-1. Basic info about matched sample size
+        # --------------------------------------------------------------
+        st.success(f"✅ Matching complete! Matched N = {len(m_df)}")
 
-    if st.button("Generate Matched Table 1", key="btn_mt1"):
-        if not t_vars:
-            st.warning("Table 1에 포함할 변수를 한 개 이상 선택해야 합니다.")
-        else:
-            mt1, err = analyze_table1_robust(
-                m_df, tc, val_map, t_vars, u_cont, u_cat
-            )
-            if err:
-                st.error(f"Error while generating Table 1: {err}")
+        with st.expander("Show sample size before / after matching", expanded=False):
+            if "__T" in org.columns:
+                org_counts = org["__T"].value_counts().to_dict()
             else:
-                st.dataframe(mt1)
-                out_m1 = io.BytesIO()
-                with pd.ExcelWriter(out_m1, engine="xlsxwriter") as w:
-                    mt1.to_excel(w, index=False)
-                st.download_button(
-                    "📥 Download Matched Table 1",
-                    data=out_m1.getvalue(),
-                    file_name="Matched_Table1.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                org_counts = {}
+            if "__T" in m_df.columns:
+                m_counts = m_df["__T"].value_counts().to_dict()
+            else:
+                m_counts = {}
+
+            treated_before = org_counts.get(1, 0)
+            control_before = org_counts.get(0, 0)
+            treated_after = m_counts.get(1, 0)
+            control_after = m_counts.get(0, 0)
+
+            st.write(
+                f"- Before: Treated = **{treated_before}**, "
+                f"Control = **{control_before}**"
+            )
+            st.write(
+                f"- After: Treated = **{treated_after}**, "
+                f"Control = **{control_after}**"
+            )
+            if treated_before > 0:
+                rate = treated_after / treated_before
+                st.write(f"- Matched proportion of treated = **{rate:.2%}**")
+
+            st.caption(
+                "⚠️ If matched N is much smaller than original, "
+                "consider using fewer covariates or a larger caliper."
+            )
+
+        # --------------------------------------------------------------
+        # 3-2. Balance check (SMD before / after)
+        # --------------------------------------------------------------
+        if covs:
+            st.markdown("### ⚖️ Balance Check (SMD)")
+            st.caption(
+                "Standardized Mean Difference (SMD) < 0.1 usually indicates good balance."
+            )
+
+            sb = calculate_smd(org, "__T", covs)
+            sa = calculate_smd(m_df, "__T", covs)
+            sm = pd.merge(sb, sa, on="Variable", suffixes=("_Before", "_After"))
+
+            st.dataframe(
+                sm.style.format({"SMD_Before": "{:.3f}", "SMD_After": "{:.3f}"})
+            )
+
+            # SMD scatter plot
+            fig, ax = plt.subplots(figsize=(8, 6))
+            sns.scatterplot(
+                data=sm,
+                x="SMD_Before",
+                y="Variable",
+                color="red",
+                label="Before matching",
+                s=100,
+                ax=ax,
+            )
+            sns.scatterplot(
+                data=sm,
+                x="SMD_After",
+                y="Variable",
+                color="blue",
+                label="After matching",
+                s=100,
+                ax=ax,
+            )
+            ax.axvline(0.1, ls="--", color="gray", alpha=0.5)
+            ax.axvline(-0.1, ls="--", color="gray", alpha=0.5)
+            ax.set_title("SMD before vs after matching")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+
+        # --------------------------------------------------------------
+        # 3-3. Download matched dataset
+        # --------------------------------------------------------------
+        out_p = io.BytesIO()
+        with pd.ExcelWriter(out_p, engine="xlsxwriter") as w:
+            m_df.drop(columns=["__T", "logit_ps"], errors="ignore").to_excel(
+                w, index=False
+            )
+        st.download_button(
+            "📥 Download Matched Data",
+            data=out_p.getvalue(),
+            file_name="Matched_Data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # --------------------------------------------------------------
+        # 3-4. Matched cohort Table 1 (compare variables after matching)
+        # --------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("📊 Matched Cohort Table 1")
+
+        # ---- 3-4-1. Group settings (like Table 1 tab) ----
+        st.markdown("#### Group Settings (Matched Data)")
+
+        uvals = m_df[tc].dropna().unique()
+        if len(uvals) < 2:
+            st.warning(
+                "Group variable in matched data must have at least two unique values."
+            )
+            return
+
+        c_g1, c_g2 = st.columns(2)
+        with c_g1:
+            default_vals = list(uvals)
+            selected_vals = st.multiselect(
+                "Groups to include in matched Table 1",
+                options=list(uvals),
+                default=default_vals,
+                key="psm_t1_selected_vals",
+            )
+
+        with c_g2:
+            st.caption("Rename groups for matched Table 1 (optional).")
+            gnames = {}
+            for v in selected_vals:
+                gnames[v] = st.text_input(
+                    f"Display name for {v}",
+                    value=str(v),
+                    key=f"psm_t1_gname_{v}",
                 )
+
+        valid_vals = [v for v in selected_vals if v in uvals]
+        if len(valid_vals) < 2:
+            st.warning("Please select at least two valid groups for matched Table 1.")
+            return
+
+        value_map = {v: gnames.get(v, str(v)) for v in valid_vals}
+
+        # ---- 3-4-2. Variable selection for matched Table 1 ----
+        # All available columns in matched data except internal ones and treatment
+        avail_cols = [
+            c
+            for c in m_df.columns
+            if c not in ["__T", "logit_ps", "propensity_score", tc]
+        ]
+
+        # Initialise variable configuration when columns or covariates change
+        _cfg = st.session_state.get("psm_var_config", None)
+        need_init = _cfg is None
+        if not need_init:
+            prev_vars = list(_cfg["Variable"])
+            if set(prev_vars) != set(avail_cols):
+                need_init = True
+
+        if need_init:
+            init_rows = []
+            for c in avail_cols:
+                # 핵심:
+                #   - 매칭에 사용한 covariate(covs)는 기본적으로 Include=False
+                #   - 그 외 "나머지 변수들"은 기본적으로 Include=True
+                include_flag = c not in covs  # 남은 변수들 기본 선택
+                init_rows.append(
+                    {
+                        "Include": include_flag,
+                        "Variable": c,
+                        "Type": suggest_variable_type_single(m_df, c),
+                    }
+                )
+            st.session_state["psm_var_config"] = pd.DataFrame(init_rows)
+
+        # Select All / Deselect All buttons
+        c_b1, c_b2, _ = st.columns([0.2, 0.2, 0.6])
+        if c_b1.button("✅ Select All (Matched)", key="psm_all"):
+            st.session_state["psm_var_config"]["Include"] = True
+            st.rerun()
+        if c_b2.button("⬜ Deselect All (Matched)", key="psm_none"):
+            st.session_state["psm_var_config"]["Include"] = False
+            st.rerun()
+
+        # Variable editor (user can freely include/exclude ANY variable)
+        psm_cfg = st.data_editor(
+            st.session_state["psm_var_config"],
+            column_config={
+                "Include": st.column_config.CheckboxColumn(width="small"),
+                "Variable": st.column_config.TextColumn(disabled=True),
+                "Type": st.column_config.SelectboxColumn(
+                    options=["Continuous", "Categorical"]
+                ),
+            },
+            hide_index=True,
+            num_rows="fixed",
+            key="psm_editor",
+        )
+        st.session_state["psm_var_config"] = psm_cfg
+
+        # Parse current selection
+        sel = psm_cfg[psm_cfg["Include"] == True]
+        t_vars = sel["Variable"].tolist()
+        u_cont = sel[sel["Type"] == "Continuous"]["Variable"].tolist()
+        u_cat = sel[sel["Type"] == "Categorical"]["Variable"].tolist()
+
+        if st.button("Generate Matched Table 1", key="btn_mt1"):
+            if not t_vars:
+                st.warning("Please select at least one variable for Table 1.")
+            else:
+                mt1, err = analyze_table1_robust(
+                    m_df, tc, value_map, t_vars, u_cont, u_cat
+                )
+                if err:
+                    st.error(f"Error while generating Table 1: {err}")
+                else:
+                    st.dataframe(mt1)
+                    out_m1 = io.BytesIO()
+                    with pd.ExcelWriter(out_m1, engine="xlsxwriter") as w:
+                        mt1.to_excel(w, index=False)
+                    st.download_button(
+                        "📥 Download Matched Table 1",
+                        data=out_m1.getvalue(),
+                        file_name="Matched_Table1.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+    # When psm_done flag is True but some keys are missing (e.g. after code update)
+    elif st.session_state.get("psm_done") and not has_all_keys:
+        st.warning(
+            "PSM state is incomplete. Please click **Run PSM** again to refresh the results."
+        )
