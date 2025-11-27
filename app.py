@@ -482,7 +482,7 @@ def render_admin_panel(current_user: dict):
                 remain = users[~users["username"].astype(str).isin(selected_to_kick)]
                 _save_users(remain)
                 st.success(f"{len(selected_to_kick)}명 강퇴 완료.")
-                st.experimental_rerun()
+                st.rerun()   # 🔁 여기 수정 (experimental_rerun → rerun)
             else:
                 st.warning("강퇴할 사용자를 선택해주세요.")
     else:
@@ -625,7 +625,7 @@ def main():
                 # 세션 초기화 + 로그인 화면으로
                 st.session_state.pop("auth_user", None)
                 st.session_state["delete_success"] = "회원 탈퇴가 완료되었습니다."
-                st.experimental_rerun()
+                st.rerun()   # 🔁 여기도 수정 (experimental_rerun → rerun)
 
         st.write("---")
         # 관리자라면 통계/관리자 모드 선택
