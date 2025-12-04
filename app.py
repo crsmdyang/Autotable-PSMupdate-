@@ -180,7 +180,6 @@ def _load_users() -> pd.DataFrame:
 
     return users
 
-
 def _authenticate(users: pd.DataFrame, username: str, password: str):
     if not username or not password:
         return None
@@ -192,11 +191,15 @@ def _authenticate(users: pd.DataFrame, username: str, password: str):
         return None
 
     # 로그인 성공 → 마지막 접속일자 업데이트
+    # last_login 컬럼을 문자열(object) 타입으로 먼저 변환해서
+    # pandas FutureWarning(타입 불일치)을 방지
+    if "last_login" in users.columns:
+        users["last_login"] = users["last_login"].astype("object")
+
     users.loc[mask, "last_login"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _save_users(users)
 
     return users.loc[mask].iloc[0].to_dict()
-
 
 def _register_user(
     users: pd.DataFrame,
@@ -695,3 +698,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
