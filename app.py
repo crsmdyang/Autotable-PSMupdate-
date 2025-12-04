@@ -2,6 +2,7 @@ import streamlit as st
 import hashlib
 from pathlib import Path
 from datetime import datetime
+import zipfile
 
 st.set_page_config(
     page_title="Medical Statistics Analysis",
@@ -554,39 +555,105 @@ def reset_session_state(new_file_id: str):
 
 
 def load_data(uploaded_file):
-    """CSV / Excel 파일을 pandas DataFrame으로 로딩."""
+    """CSV / Excel 파일을 pandas DataFrame으로 로딩. (xlsx zip 검사 + BytesIO로 안전 로딩)"""
     try:
         df = None
-        file_ext = uploaded_file.name.split(".")[-1].lower()
         selected_sheet = None
 
+        file_name = uploaded_file.name
+        file_ext = Path(file_name).suffix.lower().lstrip(".")
+        file_bytes = uploaded_file.getvalue()
+
+        if not file_bytes:
+            st.error("업로드된 파일이 비어 있습니다. 파일이 손상되었거나 읽을 수 없습니다.")
+            return None, None
+
+        # ---------- CSV ----------
         if file_ext == "csv":
             use_header = st.checkbox(
                 "Use first row as header", value=True, key="csv_use_header"
             )
             header_opt = 0 if use_header else None
-            df = pd.read_csv(uploaded_file, header=header_opt)
 
-        elif file_ext in ["xlsx", "xls"]:
-            import openpyxl  # ensure engine
+            # 인코딩 흔한 케이스 순서로 시도
+            encodings_to_try = ["utf-8-sig", "utf-8", "cp949"]
+            last_err = None
+            for enc in encodings_to_try:
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), header=header_opt, encoding=enc)
+                    last_err = None
+                    break
+                except UnicodeDecodeError as e:
+                    last_err = e
 
-            xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
+            if df is None:
+                # 그래도 안되면 pandas 기본으로 시도 (에러를 보여주기 위해)
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), header=header_opt)
+                except Exception as e:
+                    st.error(f"CSV 로딩 실패: {e}")
+                    if last_err is not None:
+                        st.info(f"인코딩 문제일 수 있습니다. 마지막 UnicodeDecodeError: {last_err}")
+                    return None, None
+
+            return df, None
+
+        # ---------- XLSX 계열 ----------
+        elif file_ext in ["xlsx", "xlsm", "xltx", "xltm"]:
+            # .xlsx는 내부적으로 zip 구조(PK..)여야 함
+            if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+                st.error(
+                    "Error loading file: File is not a zip file\n\n"
+                    "업로드한 파일이 진짜 .xlsx 형식(압축/zip 구조)이 아닙니다.\n"
+                    "- 실제로는 .xls 또는 .csv인데 확장자만 .xlsx로 바뀐 경우\n"
+                    "- 파일 손상\n"
+                    "- 암호/보호 설정된 엑셀 파일\n\n"
+                    "해결: Excel에서 '다른 이름으로 저장' → .xlsx로 다시 저장 후 업로드하세요."
+                )
+                return None, None
+
+            # openpyxl 엔진으로 안전하게 읽기 (BytesIO)
+            try:
+                xl = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+            except Exception as e:
+                st.error(
+                    f"엑셀 파일을 여는 중 오류가 발생했습니다: {e}\n"
+                    "해결: (1) 암호/보호 해제 후 재저장, (2) 파일 손상 여부 확인, (3) .xlsx로 다시 저장"
+                )
+                return None, None
+
             sheet_names = xl.sheet_names
             selected_sheet = sheet_names[0]
             if len(sheet_names) > 1:
                 selected_sheet = st.selectbox(
                     "Select Sheet", sheet_names, key="sheet_selector"
                 )
+
             use_header = st.checkbox(
                 "Use first row as header", value=True, key="excel_use_header"
             )
             header_opt = 0 if use_header else None
-            df = xl.parse(selected_sheet, header=header_opt)
+
+            try:
+                df = xl.parse(selected_sheet, header=header_opt)
+            except Exception as e:
+                st.error(f"선택한 시트를 읽는 중 오류가 발생했습니다: {e}")
+                return None, None
+
+            return df, selected_sheet
+
+        # ---------- XLS (구형, 선택 지원) ----------
+        elif file_ext == "xls":
+            st.error(
+                "현재 업로드한 파일은 .xls(구형 엑셀)입니다.\n"
+                "권장 해결: Excel에서 '다른 이름으로 저장' → .xlsx로 저장 후 업로드하세요."
+            )
+            return None, None
+
         else:
             st.error("Unsupported file format. Please upload CSV or XLSX.")
             return None, None
 
-        return df, selected_sheet
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return None, None
@@ -698,4 +765,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
