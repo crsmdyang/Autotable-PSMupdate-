@@ -101,6 +101,31 @@ def render_tab1(df: pd.DataFrame) -> None:
 
     cat_vars = [v for v in include_vars if v not in cont_vars]
 
+    # 4.5 Missing value policy (결측치 처리 방식)
+    st.markdown("#### 🧩 Missing Data Handling")
+    
+    missing_options = [
+        "Variable-wise drop (per analysis)",
+        "Complete-case (drop rows with ANY missing)",
+        "Categorical: treat missing as 'Missing' (numeric untouched)",
+        "Simple imputation (numeric=median, categorical=mode)",
+    ]
+    
+    default_policy = st.session_state.get("missing_policy", missing_options[0])
+    
+    policy = st.selectbox(
+        "Missing value policy (결측치 처리 방식)",
+        missing_options,
+        index=missing_options.index(default_policy) if default_policy in missing_options else 0,
+        key="missing_policy",
+        help=(
+            "Variable-wise: 변수별 분석 시 해당 변수에서만 결측 제외(표본수 최대화)\n"
+            "Complete-case: 포함 변수 중 결측이 하나라도 있으면 해당 행 제거(표본수 감소)\n"
+            "Categorical Missing: 범주형 결측을 'Missing' 범주로 포함\n"
+            "Simple imputation: 수치형=중앙값, 범주형=최빈값으로 대체"
+        ),
+    )
+
     # 5. 분석 실행
     if st.button("Generate Table 1", key="t1_btn_run"):
         policy = st.session_state.get(
@@ -197,3 +222,4 @@ def render_tab1(df: pd.DataFrame) -> None:
             output.getvalue(),
             "Table1_Robust.xlsx",
         )
+
