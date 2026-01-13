@@ -128,9 +128,6 @@ def render_tab1(df: pd.DataFrame) -> None:
 
     # 5. 분석 실행
     if st.button("Generate Table 1", key="t1_btn_run"):
-        policy = st.session_state.get(
-            "missing_policy", "Variable-wise drop (per analysis)"
-        )
         cols_for_analysis = [group_col] + include_vars
         df_use = apply_missing_policy(df, cols_for_analysis, policy)
 
@@ -222,4 +219,5 @@ def render_tab1(df: pd.DataFrame) -> None:
             output.getvalue(),
             "Table1_Robust.xlsx",
         )
+
 
